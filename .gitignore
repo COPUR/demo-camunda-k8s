@@ -3,3 +3,4 @@
 .cache/
 *.iml
 .idea/
+.build-ca.crt

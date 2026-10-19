@@ -8,6 +8,7 @@
 #   DEMO_CLUSTER=auto|docker-desktop|current   which cluster (default auto, see lib/common.sh)
 #   DEMO_IMAGE_LOAD="<command>"                 how to hand the image to a cluster that does not see Docker's images
 #   DEMO_SKIP_TESTS=true                        build the image without running the unit tests
+#   DEMO_BUILD_CA=<file.crt>                    a proxy CA (or bundle) the image build must trust for downloads
 set -euo pipefail
 cd "$(dirname "$0")"
 . lib/common.sh
@@ -17,6 +18,7 @@ info "preflight"
 for tool in docker kubectl helm openssl curl; do
   command -v "$tool" >/dev/null || die "$tool is required (macOS: brew install kubectl helm openssl; Docker Desktop for docker)"
 done
+pin_docker
 docker info >/dev/null 2>&1 || die "Docker is not running; start Docker Desktop"
 helm_major=$(helm version --short | sed -E 's/^v([0-9]+)\.([0-9]+).*/\1/'); helm_minor=$(helm version --short | sed -E 's/^v([0-9]+)\.([0-9]+).*/\2/')
 if [ "$helm_major" -lt 3 ] || { [ "$helm_major" -eq 3 ] && [ "$helm_minor" -lt 19 ]; }; then die "helm 3.19+ or 4.x is required"; fi
@@ -45,25 +47,47 @@ actual=$( (sha256sum "$chart" 2>/dev/null || shasum -a 256 "$chart") | cut -d' '
 
 # --- 3. Application image, built inside Docker (no host JDK) ------------------------------------------------------
 info "building $IMAGE (first build downloads Gradle and dependencies, a few minutes)"
+# .build-ca.crt lives only for the build; the EXIT trap removes it on success, failure and Ctrl-C alike.
+trap 'rm -rf "$DEMO_TMP" .build-ca.crt' EXIT
+if [ -n "${DEMO_BUILD_CA:-}" ]; then
+  grep -q -- '-----BEGIN CERTIFICATE-----' "$DEMO_BUILD_CA" 2>/dev/null \
+    || die "DEMO_BUILD_CA=$DEMO_BUILD_CA holds no PEM certificate"
+  cp "$DEMO_BUILD_CA" .build-ca.crt
+else
+  : > .build-ca.crt
+fi
 docker build -q --build-arg SKIP_TESTS="${DEMO_SKIP_TESTS:-false}" -f app/Dockerfile -t "$IMAGE" . >/dev/null
+rm -f .build-ca.crt
 load_image
 
 # --- 4. Namespace, credentials and TLS, all generated here and kept only in Secrets -------------------------------
 kubectl apply -f k8s/00-namespace.yaml >/dev/null
 secret_exists() { kubectl -n "$NS" get secret "$1" >/dev/null 2>&1; }
-random() { openssl rand -hex 24; }
+# new_secret NAME KEY... writes one random value per key into a private temporary file and creates the Secret
+# with --from-file, so no value ever appears on a command line (ps, /proc/<pid>/cmdline). The presenter password is
+# shorter so it can be typed.
+new_secret() {
+  local name="$1" key dir args=()
+  shift
+  secret_exists "$name" && return 0
+  dir=$(mktemp -d "$DEMO_TMP/secret.XXXXXX")
+  chmod 700 "$dir"
+  for key in "$@"; do
+    # printf is a shell builtin, so the value never reaches a process command line; no trailing newline.
+    if [ "$name" = demo-presenter ]; then printf '%s' "$(openssl rand -hex 12)" > "$dir/$key"
+    else printf '%s' "$(openssl rand -hex 24)" > "$dir/$key"; fi
+    args+=(--from-file="$key=$dir/$key")
+  done
+  kubectl -n "$NS" create secret generic "$name" "${args[@]}" >/dev/null
+  rm -rf "$dir"
+}
 info "credentials (generated once per namespace, never printed)"
-secret_exists demo-postgres || kubectl -n "$NS" create secret generic demo-postgres \
-  --from-literal=postgres="$(random)" --from-literal=keycloak="$(random)" --from-literal=identity="$(random)" \
-  --from-literal=hub="$(random)" --from-literal=camunda="$(random)" >/dev/null
-secret_exists demo-keycloak || kubectl -n "$NS" create secret generic demo-keycloak --from-literal=admin-password="$(random)" >/dev/null
-secret_exists demo-presenter || kubectl -n "$NS" create secret generic demo-presenter --from-literal=password="$(openssl rand -hex 12)" >/dev/null
-secret_exists demo-clients || kubectl -n "$NS" create secret generic demo-clients \
-  --from-literal=svc-bpo-worker-payments="$(random)" --from-literal=demo-loader="$(random)" >/dev/null
-secret_exists demo-pusher || kubectl -n "$NS" create secret generic demo-pusher \
-  --from-literal=app-key="$(random)" --from-literal=app-secret="$(random)" >/dev/null
-secret_exists demo-oidc || kubectl -n "$NS" create secret generic demo-oidc \
-  --from-literal=orchestration="$(random)" --from-literal=connectors="$(random)" >/dev/null
+new_secret demo-postgres postgres keycloak identity hub camunda
+new_secret demo-keycloak admin-password
+new_secret demo-presenter password
+new_secret demo-clients svc-bpo-worker-payments demo-loader
+new_secret demo-pusher app-key app-secret
+new_secret demo-oidc orchestration connectors
 
 # A demo CA (valid 7 days) and a server certificate for Keycloak and each simulated provider. keytool runs in the
 # runtime image, so the host needs no JDK.
@@ -74,9 +98,10 @@ if ! secret_exists demo-tls-ca; then
   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/ca.key" 2>/dev/null
   openssl req -x509 -new -key "$work/ca.key" -subj "/CN=bpo-demo-ms local CA" -days 7 -config "$work/ca.cnf" -extensions ca -out "$work/ca.crt"
   # A truststore with an unprotected certificate entry and no MAC, so the JVMs read it without a password.
-  docker run --rm --user "$(id -u):$(id -g)" -v "$work":/w --entrypoint keytool "$IMAGE" \
+  # The throwaway store password travels in the environment (docker run -e NAME copies it), never on an argv.
+  DEMO_STOREPASS=$(random) docker run --rm --user "$(id -u):$(id -g)" -v "$work":/w -e DEMO_STOREPASS --entrypoint keytool "$IMAGE" \
     -J-Dkeystore.pkcs12.certProtectionAlgorithm=NONE -J-Dkeystore.pkcs12.macAlgorithm=NONE -importcert -noprompt \
-    -alias bpo-demo-ca -file /w/ca.crt -keystore /w/truststore.p12 -storetype PKCS12 -storepass "$(random)" >/dev/null
+    -alias bpo-demo-ca -file /w/ca.crt -keystore /w/truststore.p12 -storetype PKCS12 -storepass:env DEMO_STOREPASS >/dev/null
   kubectl -n "$NS" create secret generic demo-tls-ca --from-file=ca.crt="$work/ca.crt" --from-file=truststore.p12="$work/truststore.p12" >/dev/null
   for name in keycloak sim-psg-tr sim-acc sim-pay sim-ntf; do
     printf 'subjectAltName=DNS:%s,DNS:%s.%s.svc,DNS:%s.%s.svc.cluster.local\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature,keyEncipherment\n' \
@@ -123,14 +148,24 @@ kubectl apply -f k8s/60-loader-job.yaml >/dev/null
 kubectl -n "$NS" wait --for=condition=complete job/demo-loader --timeout=300s >/dev/null
 kubectl -n "$NS" logs job/demo-loader | tail -1
 
-holds=""
-for _ in $(seq 1 40); do
-  holds=$(kubectl -n "$NS" logs deploy/sim-acc 2>/dev/null | sed -n 's/.*holdsCaptured=\([0-9]*\).*/\1/p' | tail -1)
-  [ "${holds:-0}" -ge 4 ] && break
-  sleep 3
-done
-if [ "${holds:-0}" -ge 4 ]; then info "verified: acc simulator captured $holds holds (expected 4 settled payments)"
-else warn "acc simulator reports holdsCaptured=${holds:-0}, expected 4; see ./status.sh"; fi
+# The four settling payments (3 ACSC, 1 PDNG then ACSC) must each capture a hold in sim-acc, which logs its counter
+# every few seconds. The worker sometimes stops activating jobs after the first load (no incident; the jobs stay
+# CREATED); a restart resumes them, and idempotency keys make any repeated call harmless. So: restart once, then fail.
+holds_captured() { kubectl -n "$NS" logs deploy/sim-acc 2>/dev/null | sed -n 's/.*holdsCaptured=\([0-9]*\).*/\1/p' | tail -1; }
+wait_for_holds() {
+  for _ in $(seq 1 40); do
+    [ "$(holds_captured)" -ge 4 ] 2>/dev/null && return 0
+    sleep 3
+  done
+  return 1
+}
+if ! wait_for_holds; then
+  warn "the payments worker has stalled (holdsCaptured=$(holds_captured)); restarting it once"
+  kubectl -n "$NS" rollout restart deployment/bpo-worker-payments >/dev/null
+  kubectl -n "$NS" rollout status deployment/bpo-worker-payments --timeout=300s
+  wait_for_holds || die "acc simulator reports holdsCaptured=$(holds_captured), expected 4; see ./status.sh"
+fi
+info "verified: acc simulator captured $(holds_captured) holds (expected 4 settled payments)"
 
 cat <<MSG
 
