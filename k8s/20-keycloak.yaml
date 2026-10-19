@@ -1,0 +1,82 @@
+# Keycloak as the demo's identity provider. Browsers use http://localhost:18080/auth, which is also the issuer in
+# every token; pods reach the same realm in the cluster (back channel), and the workers and simulators use the HTTPS
+# port with the demo CA. Management Identity creates realm camunda-platform and its own clients; the
+# keycloak-clients Job adds the demo's service clients.
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: keycloak, app.kubernetes.io/part-of: bpo-demo}
+spec:
+  selector: {app.kubernetes.io/name: keycloak}
+  ports:
+    - {name: http, port: 18080, targetPort: 18080}
+    - {name: https, port: 8443, targetPort: 8443}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: keycloak, app.kubernetes.io/part-of: bpo-demo}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: keycloak}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: keycloak, app.kubernetes.io/part-of: bpo-demo}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 0
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: keycloak
+          image: keycloak/keycloak:26.7.5@sha256:37dbaf6f0722c9ec246335f36e1ef8b2e6cb960f7c27e0d8c615121a3d475a85
+          args: ["start"]
+          env:
+            - {name: KC_DB, value: postgres}
+            - {name: KC_DB_URL, value: "jdbc:postgresql://postgres:5432/keycloak"}
+            - {name: KC_DB_USERNAME, value: keycloak}
+            - name: KC_DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: demo-postgres, key: keycloak}}
+            - {name: KC_HOSTNAME, value: "http://localhost:18080/auth"}
+            - {name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC, value: "true"}
+            - {name: KC_HTTP_RELATIVE_PATH, value: /auth}
+            - {name: KC_HTTP_ENABLED, value: "true"}
+            - {name: KC_HTTP_PORT, value: "18080"}
+            - {name: KC_HTTPS_PORT, value: "8443"}
+            - {name: KC_HTTPS_CERTIFICATE_FILE, value: /tls/tls.crt}
+            - {name: KC_HTTPS_CERTIFICATE_KEY_FILE, value: /tls/tls.key}
+            - {name: KC_HEALTH_ENABLED, value: "true"}
+            - {name: KC_BOOTSTRAP_ADMIN_USERNAME, value: kc-admin}
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom: {secretKeyRef: {name: demo-keycloak, key: admin-password}}
+            - {name: JAVA_OPTS_KC_HEAP, value: "-XX:MaxRAMPercentage=70"}
+          ports:
+            - {name: http, containerPort: 18080}
+            - {name: https, containerPort: 8443}
+            - {name: management, containerPort: 9000}
+          startupProbe:
+            httpGet: {path: /auth/health/started, port: management, scheme: HTTPS}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /auth/health/ready, port: management, scheme: HTTPS}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 250m, memory: 768Mi}
+            limits: {memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tls, mountPath: /tls, readOnly: true}
+      volumes:
+        - name: tls
+          secret: {secretName: demo-tls-keycloak}

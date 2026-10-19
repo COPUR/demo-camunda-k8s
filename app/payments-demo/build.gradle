@@ -1,0 +1,18 @@
+apply plugin: 'org.springframework.boot'
+
+description = 'payments-demo - the local POC/POT demo image: the payments workers and the domain simulator in one JVM, or each provider simulator as its own service'
+
+// Carries the simulator at runtime, so it is test-only like the simulator itself: no deployable module may depend
+// on it, and its image is built locally by demo/up.sh and never pushed.
+dependencies {
+    implementation project(':bpo-worker-payments')
+    implementation project(':domain-simulator')
+    implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'tools.jackson.core:jackson-databind'
+}
+
+tasks.named('bootJar') {
+    archiveFileName = 'payments-demo.jar'
+    mainClass = 'com.bank.bpo.demo.DemoMain'
+}
+tasks.named('jar') { enabled = false }

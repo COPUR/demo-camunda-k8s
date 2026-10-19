@@ -1,0 +1,378 @@
+# The demo's own services, one Deployment, Service and ServiceAccount each: the four simulated providers
+# (psg-tr, acc, pay, ntf), each an HTTPS front door that checks the caller's Keycloak token, and the real payments
+# workers on their deployed path. All run from the locally built image bpo-payments-demo:local (never pushed);
+# BPO_DEMO_ROLE picks the service.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sim-psg-tr
+  namespace: bpo-demo-ms
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sim-psg-tr
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: sim-psg-tr, app.kubernetes.io/part-of: bpo-demo}
+spec:
+  selector: {app.kubernetes.io/name: sim-psg-tr}
+  ports:
+    - {name: https, port: 8443, targetPort: 8443}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sim-psg-tr
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: sim-psg-tr, app.kubernetes.io/part-of: bpo-demo, bpo.demo/role: provider-simulator}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: sim-psg-tr}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: sim-psg-tr, app.kubernetes.io/part-of: bpo-demo, bpo.demo/role: provider-simulator}
+    spec:
+      serviceAccountName: sim-psg-tr
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: sim-psg-tr
+          image: bpo-payments-demo:local
+          imagePullPolicy: Never
+          env:
+            - {name: BPO_DEMO_ACK, value: synthetic-data-only}
+            - {name: JAVA_TOOL_OPTIONS, value: "-Djavax.net.ssl.trustStore=/tls-ca/truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12"}
+            - {name: BPO_DEMO_ROLE, value: psg-tr}
+            - {name: BPO_DEMO_TOKEN_ISSUER, value: "http://localhost:18080/auth/realms/camunda-platform"}
+            - {name: BPO_DEMO_JWKS_URI, value: "https://keycloak:8443/auth/realms/camunda-platform/protocol/openid-connect/certs"}
+            - {name: BPO_DEMO_ALLOWED_CALLER, value: svc-bpo-worker-payments}
+            - {name: BPO_DEMO_TLS_CERT, value: /tls/tls.crt}
+            - {name: BPO_DEMO_TLS_KEY, value: /tls/tls.key}
+          ports:
+            - {name: https, containerPort: 8443}
+          readinessProbe:
+            httpGet: {path: /healthz, port: https, scheme: HTTPS}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 192Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tls, mountPath: /tls, readOnly: true}
+            - {name: tls-ca, mountPath: /tls-ca, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+            - {name: scenarios, mountPath: /config, readOnly: true}
+      volumes:
+        - name: tls
+          secret: {secretName: demo-tls-sim-psg-tr}
+        - name: tls-ca
+          secret: {secretName: demo-tls-ca}
+        - {name: tmp, emptyDir: {}}
+        - name: scenarios
+          configMap: {name: demo-scenarios}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sim-acc
+  namespace: bpo-demo-ms
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sim-acc
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: sim-acc, app.kubernetes.io/part-of: bpo-demo}
+spec:
+  selector: {app.kubernetes.io/name: sim-acc}
+  ports:
+    - {name: https, port: 8443, targetPort: 8443}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sim-acc
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: sim-acc, app.kubernetes.io/part-of: bpo-demo, bpo.demo/role: provider-simulator}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: sim-acc}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: sim-acc, app.kubernetes.io/part-of: bpo-demo, bpo.demo/role: provider-simulator}
+    spec:
+      serviceAccountName: sim-acc
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: sim-acc
+          image: bpo-payments-demo:local
+          imagePullPolicy: Never
+          env:
+            - {name: BPO_DEMO_ACK, value: synthetic-data-only}
+            - {name: JAVA_TOOL_OPTIONS, value: "-Djavax.net.ssl.trustStore=/tls-ca/truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12"}
+            - {name: BPO_DEMO_ROLE, value: acc}
+            - {name: BPO_DEMO_TOKEN_ISSUER, value: "http://localhost:18080/auth/realms/camunda-platform"}
+            - {name: BPO_DEMO_JWKS_URI, value: "https://keycloak:8443/auth/realms/camunda-platform/protocol/openid-connect/certs"}
+            - {name: BPO_DEMO_ALLOWED_CALLER, value: svc-bpo-worker-payments}
+            - {name: BPO_DEMO_TLS_CERT, value: /tls/tls.crt}
+            - {name: BPO_DEMO_TLS_KEY, value: /tls/tls.key}
+          ports:
+            - {name: https, containerPort: 8443}
+          readinessProbe:
+            httpGet: {path: /healthz, port: https, scheme: HTTPS}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 192Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tls, mountPath: /tls, readOnly: true}
+            - {name: tls-ca, mountPath: /tls-ca, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tls
+          secret: {secretName: demo-tls-sim-acc}
+        - name: tls-ca
+          secret: {secretName: demo-tls-ca}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sim-pay
+  namespace: bpo-demo-ms
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sim-pay
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: sim-pay, app.kubernetes.io/part-of: bpo-demo}
+spec:
+  selector: {app.kubernetes.io/name: sim-pay}
+  ports:
+    - {name: https, port: 8443, targetPort: 8443}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sim-pay
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: sim-pay, app.kubernetes.io/part-of: bpo-demo, bpo.demo/role: provider-simulator}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: sim-pay}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: sim-pay, app.kubernetes.io/part-of: bpo-demo, bpo.demo/role: provider-simulator}
+    spec:
+      serviceAccountName: sim-pay
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: sim-pay
+          image: bpo-payments-demo:local
+          imagePullPolicy: Never
+          env:
+            - {name: BPO_DEMO_ACK, value: synthetic-data-only}
+            - {name: JAVA_TOOL_OPTIONS, value: "-Djavax.net.ssl.trustStore=/tls-ca/truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12"}
+            - {name: BPO_DEMO_ROLE, value: pay}
+            - {name: BPO_DEMO_TOKEN_ISSUER, value: "http://localhost:18080/auth/realms/camunda-platform"}
+            - {name: BPO_DEMO_JWKS_URI, value: "https://keycloak:8443/auth/realms/camunda-platform/protocol/openid-connect/certs"}
+            - {name: BPO_DEMO_ALLOWED_CALLER, value: svc-bpo-worker-payments}
+            - {name: BPO_DEMO_TLS_CERT, value: /tls/tls.crt}
+            - {name: BPO_DEMO_TLS_KEY, value: /tls/tls.key}
+          ports:
+            - {name: https, containerPort: 8443}
+          readinessProbe:
+            httpGet: {path: /healthz, port: https, scheme: HTTPS}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 192Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tls, mountPath: /tls, readOnly: true}
+            - {name: tls-ca, mountPath: /tls-ca, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tls
+          secret: {secretName: demo-tls-sim-pay}
+        - name: tls-ca
+          secret: {secretName: demo-tls-ca}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sim-ntf
+  namespace: bpo-demo-ms
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sim-ntf
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: sim-ntf, app.kubernetes.io/part-of: bpo-demo}
+spec:
+  selector: {app.kubernetes.io/name: sim-ntf}
+  ports:
+    - {name: https, port: 8443, targetPort: 8443}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sim-ntf
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: sim-ntf, app.kubernetes.io/part-of: bpo-demo, bpo.demo/role: provider-simulator}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: sim-ntf}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: sim-ntf, app.kubernetes.io/part-of: bpo-demo, bpo.demo/role: provider-simulator}
+    spec:
+      serviceAccountName: sim-ntf
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: sim-ntf
+          image: bpo-payments-demo:local
+          imagePullPolicy: Never
+          env:
+            - {name: BPO_DEMO_ACK, value: synthetic-data-only}
+            - {name: JAVA_TOOL_OPTIONS, value: "-Djavax.net.ssl.trustStore=/tls-ca/truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12"}
+            - {name: BPO_DEMO_ROLE, value: ntf}
+            - {name: BPO_DEMO_TOKEN_ISSUER, value: "http://localhost:18080/auth/realms/camunda-platform"}
+            - {name: BPO_DEMO_JWKS_URI, value: "https://keycloak:8443/auth/realms/camunda-platform/protocol/openid-connect/certs"}
+            - {name: BPO_DEMO_ALLOWED_CALLER, value: svc-bpo-worker-payments}
+            - {name: BPO_DEMO_TLS_CERT, value: /tls/tls.crt}
+            - {name: BPO_DEMO_TLS_KEY, value: /tls/tls.key}
+          ports:
+            - {name: https, containerPort: 8443}
+          readinessProbe:
+            httpGet: {path: /healthz, port: https, scheme: HTTPS}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 192Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tls, mountPath: /tls, readOnly: true}
+            - {name: tls-ca, mountPath: /tls-ca, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tls
+          secret: {secretName: demo-tls-sim-ntf}
+        - name: tls-ca
+          secret: {secretName: demo-tls-ca}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bpo-worker-payments
+  namespace: bpo-demo-ms
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bpo-worker-payments
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: bpo-worker-payments, app.kubernetes.io/part-of: bpo-demo}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: bpo-worker-payments}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: bpo-worker-payments, app.kubernetes.io/part-of: bpo-demo}
+    spec:
+      serviceAccountName: bpo-worker-payments
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: bpo-worker-payments
+          image: bpo-payments-demo:local
+          imagePullPolicy: Never
+          env:
+            - {name: BPO_DEMO_ACK, value: synthetic-data-only}
+            - {name: JAVA_TOOL_OPTIONS, value: "-Djavax.net.ssl.trustStore=/tls-ca/truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12"}
+            - {name: BPO_DEMO_ROLE, value: worker}
+            - {name: BPO_PROVIDER_PSG_TR_URL, value: "https://sim-psg-tr:8443/"}
+            - {name: BPO_PROVIDER_ACC_URL, value: "https://sim-acc:8443/"}
+            - {name: BPO_PROVIDER_PAY_URL, value: "https://sim-pay:8443/"}
+            - {name: BPO_PROVIDER_NTF_URL, value: "https://sim-ntf:8443/"}
+            - {name: BPO_AUTH_TOKEN_URI, value: "https://keycloak:8443/auth/realms/camunda-platform/protocol/openid-connect/token"}
+            - {name: BPO_AUTH_SCOPE_PSG_TR, value: aud-svc-psg-tr}
+            - {name: BPO_AUTH_SCOPE_ACC, value: aud-svc-acc-accounts-ledger}
+            - {name: BPO_AUTH_SCOPE_PAY, value: aud-svc-pay-initiation-settlement}
+            - {name: BPO_AUTH_SCOPE_NTF, value: aud-svc-ntf}
+            - name: BPO_AUTH_CLIENT_CREDENTIAL
+              valueFrom: {secretKeyRef: {name: demo-clients, key: svc-bpo-worker-payments}}
+            - {name: CAMUNDA_CLIENT_MODE, value: self-managed}
+            - {name: CAMUNDA_CLIENT_REST_ADDRESS, value: "http://camunda-zeebe-gateway:8080"}
+            - {name: CAMUNDA_CLIENT_GRPC_ADDRESS, value: "http://camunda-zeebe-gateway:26500"}
+            - {name: CAMUNDA_CLIENT_AUTH_METHOD, value: oidc}
+            - {name: CAMUNDA_CLIENT_AUTH_CLIENT_ID, value: svc-bpo-worker-payments}
+            - name: CAMUNDA_CLIENT_AUTH_CLIENT_SECRET
+              valueFrom: {secretKeyRef: {name: demo-clients, key: svc-bpo-worker-payments}}
+            - {name: CAMUNDA_CLIENT_AUTH_TOKEN_URL, value: "https://keycloak:8443/auth/realms/camunda-platform/protocol/openid-connect/token"}
+            - {name: CAMUNDA_CLIENT_AUTH_AUDIENCE, value: orchestration-api}
+          resources:
+            requests: {cpu: 100m, memory: 384Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tls-ca, mountPath: /tls-ca, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tls-ca
+          secret: {secretName: demo-tls-ca}
+        - {name: tmp, emptyDir: {}}

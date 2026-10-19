@@ -1,0 +1,18 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        // The Spring Boot plugin's own dependencies are only on Maven Central.
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'demo-camunda-k8s'
+
+// Shared worker kit: idempotency keys, output-variable guard, provider HTTP, job error mapping.
+include 'bpo-worker-kit'
+// The P2 (pay-instant-exception) job workers.
+include 'bpo-worker-payments'
+// In-process stand-in for the provider operations the workers call.
+include 'domain-simulator'
+// The one image the demo runs: the workers, or one simulated provider, chosen per Deployment.
+include 'payments-demo'

@@ -1,0 +1,460 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+                  xmlns:modeler="http://camunda.org/schema/modeler/1.0"
+                  id="Definitions_PayInstantException"
+                  targetNamespace="https://fintechbankx.example/bpo"
+                  exporter="fbx-bpo" exporterVersion="0.1.0"
+                  modeler:executionPlatform="Camunda Cloud"
+                  modeler:executionPlatformVersion="8.10.0">
+  <bpmn:error id="Error_StatusTimeout" name="Err_StatusTimeout" errorCode="Err_StatusTimeout" />
+  <!-- P2 (05 §6.4, 07 §3.3; TR profile TR-04 in 08 §10.1): an instant payment whose scheme answer did not come
+       back in time. The happy path (hold, send to FAST, capture) is pay's and never runs here. pay sets the
+       payment to EXCEPTION_OWNED_BY_BPO and the event bridge starts this instance with paymentId, jurisdiction
+       and rail. From then on only this instance commands the payment: it reads the scheme status (never sends
+       again), captures or releases the hold exactly once, tells pay and the customer. A status that stays
+       unknown goes to payments operations; the outcome of record is pay's. Camunda holds ids and enums only. -->
+  <bpmn:process id="pay-instant-exception" name="Instant payment exception" isExecutable="true">
+    <bpmn:extensionElements>
+      <zeebe:versionTag value="0.1.0" />
+    </bpmn:extensionElements>
+    <bpmn:startEvent id="StartEvent_ExceptionRaised" name="Payment exception raised">
+      <bpmn:outgoing>Flow_ToAwaitStatus</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:callActivity id="Task_AwaitSchemeStatus" name="Await scheme status">
+      <bpmn:extensionElements>
+        <zeebe:calledElement processId="lib-await-external-status" propagateAllChildVariables="false" propagateAllParentVariables="false" bindingType="versionTag" versionTag="0.1.0" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=rail" target="rail" />
+          <zeebe:input source="=paymentId" target="sourceRef" />
+          <zeebe:output source="=schemeStatus" target="schemeStatus" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToAwaitStatus</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToSchemeStatus</bpmn:outgoing>
+    </bpmn:callActivity>
+    <bpmn:boundaryEvent id="BoundaryEvent_StatusTimeout" name="Status still unknown" attachedToRef="Task_AwaitSchemeStatus">
+      <bpmn:outgoing>Flow_StatusTimeoutToJoin</bpmn:outgoing>
+      <bpmn:errorEventDefinition id="ErrorEventDefinition_StatusTimeout" errorRef="Error_StatusTimeout" />
+    </bpmn:boundaryEvent>
+    <!-- Only an explicit ACSC captures and only an explicit RJCT releases; anything else goes to people. -->
+    <bpmn:exclusiveGateway id="Gateway_SchemeStatus" name="Scheme status?" default="Flow_StatusUnclear">
+      <bpmn:incoming>Flow_ToSchemeStatus</bpmn:incoming>
+      <bpmn:outgoing>Flow_StatusSettled</bpmn:outgoing>
+      <bpmn:outgoing>Flow_StatusRejected</bpmn:outgoing>
+      <bpmn:outgoing>Flow_StatusUnclear</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:exclusiveGateway id="Gateway_JoinOpsReview">
+      <bpmn:incoming>Flow_StatusTimeoutToJoin</bpmn:incoming>
+      <bpmn:incoming>Flow_StatusUnclear</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToRouteException</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:businessRuleTask id="Task_RouteException" name="Route to payments operations">
+      <bpmn:extensionElements>
+        <zeebe:calledDecision decisionId="pay-exception-routing" resultVariable="exceptionRouting" bindingType="versionTag" versionTag="0.1.0" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToRouteException</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToOpsReview</bpmn:outgoing>
+    </bpmn:businessRuleTask>
+    <bpmn:userTask id="Task_OpsReview" name="Check the scheme record">
+      <bpmn:extensionElements>
+        <zeebe:userTask />
+        <zeebe:formDefinition formId="pay-exception-ops-decision" bindingType="deployment" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=exceptionDecision" target="exceptionDecision" />
+        </zeebe:ioMapping>
+        <zeebe:assignmentDefinition candidateGroups="=[exceptionRouting.opsQueue]" />
+        <zeebe:taskSchedule dueDate="=now() + duration(exceptionRouting.opsSla)" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToOpsReview</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToOpsDecision</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:boundaryEvent id="BoundaryEvent_OpsSla" name="Operations SLA expired" attachedToRef="Task_OpsReview">
+      <bpmn:outgoing>Flow_OpsSlaToJoin</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="TimerEventDefinition_OpsSla">
+        <bpmn:timeDuration>=exceptionRouting.opsSla</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:exclusiveGateway id="Gateway_OpsDecision" name="Operations decision?" default="Flow_OpsDecided">
+      <bpmn:incoming>Flow_ToOpsDecision</bpmn:incoming>
+      <bpmn:outgoing>Flow_OpsEscalated</bpmn:outgoing>
+      <bpmn:outgoing>Flow_OpsDecided</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:exclusiveGateway id="Gateway_JoinSupervisorReview">
+      <bpmn:incoming>Flow_OpsEscalated</bpmn:incoming>
+      <bpmn:incoming>Flow_OpsSlaToJoin</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToSupervisorReview</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:userTask id="Task_SupervisorReview" name="Supervisor checks the scheme record">
+      <bpmn:extensionElements>
+        <zeebe:userTask />
+        <zeebe:formDefinition formId="pay-exception-supervisor-decision" bindingType="deployment" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=exceptionDecision" target="exceptionDecision" />
+        </zeebe:ioMapping>
+        <zeebe:assignmentDefinition candidateGroups="=[exceptionRouting.supervisorQueue]" />
+        <zeebe:taskSchedule dueDate="=now() + duration(exceptionRouting.supervisorSla)" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToSupervisorReview</bpmn:incoming>
+      <bpmn:outgoing>Flow_SupervisorDecided</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:boundaryEvent id="BoundaryEvent_SupervisorSla" name="Supervisor SLA expired" attachedToRef="Task_SupervisorReview">
+      <bpmn:outgoing>Flow_ToDecisionExpired</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="TimerEventDefinition_SupervisorSla">
+        <bpmn:timeDuration>=exceptionRouting.supervisorSla</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:intermediateThrowEvent id="Event_DecisionExpired" name="Nobody decided">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <!-- No money moves on an expiry: pay takes the payment back (HANDED_BACK) and the hold stays. -->
+          <zeebe:output source="=&#34;EXPIRED&#34;" target="exceptionDecision" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToDecisionExpired</bpmn:incoming>
+      <bpmn:outgoing>Flow_ExpiredToJoin</bpmn:outgoing>
+    </bpmn:intermediateThrowEvent>
+    <bpmn:exclusiveGateway id="Gateway_JoinRecordDecision">
+      <bpmn:incoming>Flow_OpsDecided</bpmn:incoming>
+      <bpmn:incoming>Flow_SupervisorDecided</bpmn:incoming>
+      <bpmn:incoming>Flow_ExpiredToJoin</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToRecordDecision</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="Task_RecordExceptionDecision" name="Record the decision with pay">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pay.record-exception-decision" retries="5" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToRecordDecision</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToExceptionOutcome</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="Gateway_ExceptionOutcome" name="pay's outcome?" default="Flow_HandedBack">
+      <bpmn:incoming>Flow_ToExceptionOutcome</bpmn:incoming>
+      <bpmn:outgoing>Flow_OutcomeSettle</bpmn:outgoing>
+      <bpmn:outgoing>Flow_OutcomeRelease</bpmn:outgoing>
+      <bpmn:outgoing>Flow_HandedBack</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="EndEvent_HandedBack" name="Handed back to pay">
+      <bpmn:incoming>Flow_HandedBack</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:exclusiveGateway id="Gateway_JoinCapture">
+      <bpmn:incoming>Flow_StatusSettled</bpmn:incoming>
+      <bpmn:incoming>Flow_OutcomeSettle</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToCaptureHold</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="Task_CaptureHold" name="Capture the hold">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="acc.capture-hold" retries="5" />
+        <zeebe:properties>
+          <!-- Pivot (05 §7): the journal entry exists after this step; only retryable steps follow. -->
+          <zeebe:property name="bpo:pivot" value="true" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToCaptureHold</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToMarkSettled</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="Task_MarkSettled" name="Mark the payment settled">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pay.mark-settled" retries="5" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToMarkSettled</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToNotifySettled</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="Task_NotifySettled" name="Notify customer: payment completed">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="ntf.notify-payment" retries="5" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=&#34;PAYMENT_SETTLED&#34;" target="purpose" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToNotifySettled</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToSettled</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:endEvent id="EndEvent_Settled" name="Payment settled">
+      <bpmn:incoming>Flow_ToSettled</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:exclusiveGateway id="Gateway_JoinRelease">
+      <bpmn:incoming>Flow_StatusRejected</bpmn:incoming>
+      <bpmn:incoming>Flow_OutcomeRelease</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToReleaseHold</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="Task_ReleaseHold" name="Release the hold">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="acc.release-hold" retries="5" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToReleaseHold</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToMarkRejected</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="Task_MarkRejected" name="Mark the payment rejected">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pay.mark-rejected" retries="5" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToMarkRejected</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToNotifyRejected</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="Task_NotifyRejected" name="Notify customer: payment not completed">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="ntf.notify-payment" retries="5" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=&#34;PAYMENT_REJECTED&#34;" target="purpose" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToNotifyRejected</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToRejected</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:endEvent id="EndEvent_Rejected" name="Payment rejected">
+      <bpmn:incoming>Flow_ToRejected</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="Flow_ToAwaitStatus" sourceRef="StartEvent_ExceptionRaised" targetRef="Task_AwaitSchemeStatus" />
+    <bpmn:sequenceFlow id="Flow_ToSchemeStatus" sourceRef="Task_AwaitSchemeStatus" targetRef="Gateway_SchemeStatus" />
+    <bpmn:sequenceFlow id="Flow_StatusSettled" name="ACSC" sourceRef="Gateway_SchemeStatus" targetRef="Gateway_JoinCapture">
+      <bpmn:conditionExpression>=schemeStatus = "ACSC"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_StatusRejected" name="RJCT" sourceRef="Gateway_SchemeStatus" targetRef="Gateway_JoinRelease">
+      <bpmn:conditionExpression>=schemeStatus = "RJCT"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_StatusUnclear" name="otherwise" sourceRef="Gateway_SchemeStatus" targetRef="Gateway_JoinOpsReview" />
+    <bpmn:sequenceFlow id="Flow_StatusTimeoutToJoin" sourceRef="BoundaryEvent_StatusTimeout" targetRef="Gateway_JoinOpsReview" />
+    <bpmn:sequenceFlow id="Flow_ToRouteException" sourceRef="Gateway_JoinOpsReview" targetRef="Task_RouteException" />
+    <bpmn:sequenceFlow id="Flow_ToOpsReview" sourceRef="Task_RouteException" targetRef="Task_OpsReview" />
+    <bpmn:sequenceFlow id="Flow_ToOpsDecision" sourceRef="Task_OpsReview" targetRef="Gateway_OpsDecision" />
+    <bpmn:sequenceFlow id="Flow_OpsEscalated" name="ESCALATE" sourceRef="Gateway_OpsDecision" targetRef="Gateway_JoinSupervisorReview">
+      <bpmn:conditionExpression>=exceptionDecision = "ESCALATE"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_OpsDecided" name="SETTLED or REJECTED" sourceRef="Gateway_OpsDecision" targetRef="Gateway_JoinRecordDecision" />
+    <bpmn:sequenceFlow id="Flow_OpsSlaToJoin" sourceRef="BoundaryEvent_OpsSla" targetRef="Gateway_JoinSupervisorReview" />
+    <bpmn:sequenceFlow id="Flow_ToSupervisorReview" sourceRef="Gateway_JoinSupervisorReview" targetRef="Task_SupervisorReview" />
+    <bpmn:sequenceFlow id="Flow_SupervisorDecided" sourceRef="Task_SupervisorReview" targetRef="Gateway_JoinRecordDecision" />
+    <bpmn:sequenceFlow id="Flow_ToDecisionExpired" sourceRef="BoundaryEvent_SupervisorSla" targetRef="Event_DecisionExpired" />
+    <bpmn:sequenceFlow id="Flow_ExpiredToJoin" sourceRef="Event_DecisionExpired" targetRef="Gateway_JoinRecordDecision" />
+    <bpmn:sequenceFlow id="Flow_ToRecordDecision" sourceRef="Gateway_JoinRecordDecision" targetRef="Task_RecordExceptionDecision" />
+    <bpmn:sequenceFlow id="Flow_ToExceptionOutcome" sourceRef="Task_RecordExceptionDecision" targetRef="Gateway_ExceptionOutcome" />
+    <bpmn:sequenceFlow id="Flow_OutcomeSettle" name="SETTLE" sourceRef="Gateway_ExceptionOutcome" targetRef="Gateway_JoinCapture">
+      <bpmn:conditionExpression>=exceptionOutcome = "SETTLE"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_OutcomeRelease" name="RELEASE" sourceRef="Gateway_ExceptionOutcome" targetRef="Gateway_JoinRelease">
+      <bpmn:conditionExpression>=exceptionOutcome = "RELEASE"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_HandedBack" name="HANDED_BACK" sourceRef="Gateway_ExceptionOutcome" targetRef="EndEvent_HandedBack" />
+    <bpmn:sequenceFlow id="Flow_ToCaptureHold" sourceRef="Gateway_JoinCapture" targetRef="Task_CaptureHold" />
+    <bpmn:sequenceFlow id="Flow_ToMarkSettled" sourceRef="Task_CaptureHold" targetRef="Task_MarkSettled" />
+    <bpmn:sequenceFlow id="Flow_ToNotifySettled" sourceRef="Task_MarkSettled" targetRef="Task_NotifySettled" />
+    <bpmn:sequenceFlow id="Flow_ToSettled" sourceRef="Task_NotifySettled" targetRef="EndEvent_Settled" />
+    <bpmn:sequenceFlow id="Flow_ToReleaseHold" sourceRef="Gateway_JoinRelease" targetRef="Task_ReleaseHold" />
+    <bpmn:sequenceFlow id="Flow_ToMarkRejected" sourceRef="Task_ReleaseHold" targetRef="Task_MarkRejected" />
+    <bpmn:sequenceFlow id="Flow_ToNotifyRejected" sourceRef="Task_MarkRejected" targetRef="Task_NotifyRejected" />
+    <bpmn:sequenceFlow id="Flow_ToRejected" sourceRef="Task_NotifyRejected" targetRef="EndEvent_Rejected" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="pay-instant-exception">
+      <bpmndi:BPMNShape id="StartEvent_ExceptionRaised_di" bpmnElement="StartEvent_ExceptionRaised">
+        <dc:Bounds x="102" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_AwaitSchemeStatus_di" bpmnElement="Task_AwaitSchemeStatus">
+        <dc:Bounds x="240" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_SchemeStatus_di" bpmnElement="Gateway_SchemeStatus">
+        <dc:Bounds x="435" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_JoinOpsReview_di" bpmnElement="Gateway_JoinOpsReview">
+        <dc:Bounds x="605" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RouteException_di" bpmnElement="Task_RouteException">
+        <dc:Bounds x="750" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_OpsReview_di" bpmnElement="Task_OpsReview">
+        <dc:Bounds x="920" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_OpsDecision_di" bpmnElement="Gateway_OpsDecision">
+        <dc:Bounds x="1115" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_JoinSupervisorReview_di" bpmnElement="Gateway_JoinSupervisorReview">
+        <dc:Bounds x="1285" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_SupervisorReview_di" bpmnElement="Task_SupervisorReview">
+        <dc:Bounds x="1430" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_DecisionExpired_di" bpmnElement="Event_DecisionExpired">
+        <dc:Bounds x="1632" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_JoinRecordDecision_di" bpmnElement="Gateway_JoinRecordDecision">
+        <dc:Bounds x="1795" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RecordExceptionDecision_di" bpmnElement="Task_RecordExceptionDecision">
+        <dc:Bounds x="1940" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_ExceptionOutcome_di" bpmnElement="Gateway_ExceptionOutcome">
+        <dc:Bounds x="2135" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_HandedBack_di" bpmnElement="EndEvent_HandedBack">
+        <dc:Bounds x="2312" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_JoinCapture_di" bpmnElement="Gateway_JoinCapture">
+        <dc:Bounds x="2305" y="245" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_JoinRelease_di" bpmnElement="Gateway_JoinRelease">
+        <dc:Bounds x="2305" y="395" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_CaptureHold_di" bpmnElement="Task_CaptureHold">
+        <dc:Bounds x="2450" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_ReleaseHold_di" bpmnElement="Task_ReleaseHold">
+        <dc:Bounds x="2450" y="230" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_MarkSettled_di" bpmnElement="Task_MarkSettled">
+        <dc:Bounds x="2620" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_MarkRejected_di" bpmnElement="Task_MarkRejected">
+        <dc:Bounds x="2620" y="230" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_NotifySettled_di" bpmnElement="Task_NotifySettled">
+        <dc:Bounds x="2790" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_NotifyRejected_di" bpmnElement="Task_NotifyRejected">
+        <dc:Bounds x="2790" y="230" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_Settled_di" bpmnElement="EndEvent_Settled">
+        <dc:Bounds x="2992" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_Rejected_di" bpmnElement="EndEvent_Rejected">
+        <dc:Bounds x="2992" y="252" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BoundaryEvent_StatusTimeout_di" bpmnElement="BoundaryEvent_StatusTimeout">
+        <dc:Bounds x="290" y="142" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BoundaryEvent_OpsSla_di" bpmnElement="BoundaryEvent_OpsSla">
+        <dc:Bounds x="970" y="142" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BoundaryEvent_SupervisorSla_di" bpmnElement="BoundaryEvent_SupervisorSla">
+        <dc:Bounds x="1480" y="142" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Flow_ToAwaitStatus_di" bpmnElement="Flow_ToAwaitStatus">
+        <di:waypoint x="120" y="120" />
+        <di:waypoint x="290" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToSchemeStatus_di" bpmnElement="Flow_ToSchemeStatus">
+        <di:waypoint x="290" y="120" />
+        <di:waypoint x="460" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_StatusSettled_di" bpmnElement="Flow_StatusSettled">
+        <di:waypoint x="460" y="120" />
+        <di:waypoint x="460" y="270" />
+        <di:waypoint x="2330" y="270" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_StatusRejected_di" bpmnElement="Flow_StatusRejected">
+        <di:waypoint x="460" y="120" />
+        <di:waypoint x="460" y="420" />
+        <di:waypoint x="2330" y="420" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_StatusUnclear_di" bpmnElement="Flow_StatusUnclear">
+        <di:waypoint x="460" y="120" />
+        <di:waypoint x="630" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_StatusTimeoutToJoin_di" bpmnElement="Flow_StatusTimeoutToJoin">
+        <di:waypoint x="308" y="160" />
+        <di:waypoint x="308" y="120" />
+        <di:waypoint x="630" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToRouteException_di" bpmnElement="Flow_ToRouteException">
+        <di:waypoint x="630" y="120" />
+        <di:waypoint x="800" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToOpsReview_di" bpmnElement="Flow_ToOpsReview">
+        <di:waypoint x="800" y="120" />
+        <di:waypoint x="970" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToOpsDecision_di" bpmnElement="Flow_ToOpsDecision">
+        <di:waypoint x="970" y="120" />
+        <di:waypoint x="1140" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_OpsEscalated_di" bpmnElement="Flow_OpsEscalated">
+        <di:waypoint x="1140" y="120" />
+        <di:waypoint x="1310" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_OpsDecided_di" bpmnElement="Flow_OpsDecided">
+        <di:waypoint x="1140" y="120" />
+        <di:waypoint x="1820" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_OpsSlaToJoin_di" bpmnElement="Flow_OpsSlaToJoin">
+        <di:waypoint x="988" y="160" />
+        <di:waypoint x="988" y="120" />
+        <di:waypoint x="1310" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToSupervisorReview_di" bpmnElement="Flow_ToSupervisorReview">
+        <di:waypoint x="1310" y="120" />
+        <di:waypoint x="1480" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_SupervisorDecided_di" bpmnElement="Flow_SupervisorDecided">
+        <di:waypoint x="1480" y="120" />
+        <di:waypoint x="1820" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToDecisionExpired_di" bpmnElement="Flow_ToDecisionExpired">
+        <di:waypoint x="1498" y="160" />
+        <di:waypoint x="1498" y="120" />
+        <di:waypoint x="1650" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ExpiredToJoin_di" bpmnElement="Flow_ExpiredToJoin">
+        <di:waypoint x="1650" y="120" />
+        <di:waypoint x="1820" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToRecordDecision_di" bpmnElement="Flow_ToRecordDecision">
+        <di:waypoint x="1820" y="120" />
+        <di:waypoint x="1990" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToExceptionOutcome_di" bpmnElement="Flow_ToExceptionOutcome">
+        <di:waypoint x="1990" y="120" />
+        <di:waypoint x="2160" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_OutcomeSettle_di" bpmnElement="Flow_OutcomeSettle">
+        <di:waypoint x="2160" y="120" />
+        <di:waypoint x="2160" y="270" />
+        <di:waypoint x="2330" y="270" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_OutcomeRelease_di" bpmnElement="Flow_OutcomeRelease">
+        <di:waypoint x="2160" y="120" />
+        <di:waypoint x="2160" y="420" />
+        <di:waypoint x="2330" y="420" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_HandedBack_di" bpmnElement="Flow_HandedBack">
+        <di:waypoint x="2160" y="120" />
+        <di:waypoint x="2330" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToCaptureHold_di" bpmnElement="Flow_ToCaptureHold">
+        <di:waypoint x="2330" y="270" />
+        <di:waypoint x="2330" y="120" />
+        <di:waypoint x="2500" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToMarkSettled_di" bpmnElement="Flow_ToMarkSettled">
+        <di:waypoint x="2500" y="120" />
+        <di:waypoint x="2670" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToNotifySettled_di" bpmnElement="Flow_ToNotifySettled">
+        <di:waypoint x="2670" y="120" />
+        <di:waypoint x="2840" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToSettled_di" bpmnElement="Flow_ToSettled">
+        <di:waypoint x="2840" y="120" />
+        <di:waypoint x="3010" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToReleaseHold_di" bpmnElement="Flow_ToReleaseHold">
+        <di:waypoint x="2330" y="420" />
+        <di:waypoint x="2330" y="270" />
+        <di:waypoint x="2500" y="270" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToMarkRejected_di" bpmnElement="Flow_ToMarkRejected">
+        <di:waypoint x="2500" y="270" />
+        <di:waypoint x="2670" y="270" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToNotifyRejected_di" bpmnElement="Flow_ToNotifyRejected">
+        <di:waypoint x="2670" y="270" />
+        <di:waypoint x="2840" y="270" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToRejected_di" bpmnElement="Flow_ToRejected">
+        <di:waypoint x="2840" y="270" />
+        <di:waypoint x="3010" y="270" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

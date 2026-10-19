@@ -1,0 +1,16 @@
+apply plugin: 'org.springframework.boot'
+
+description = 'bpo-worker-payments - job workers for the payments family (P2 instant payment exception, TR FAST profile)'
+
+dependencies {
+    implementation project(':bpo-worker-kit')
+    implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'tools.jackson.core:jackson-databind'
+
+    testImplementation project(':domain-simulator')
+    testImplementation 'com.tngtech.archunit:archunit-junit5:' + archunitVersion
+    testImplementation 'org.springframework:spring-test'
+}
+
+tasks.named('bootJar') { enabled = false }
+tasks.named('jar') { enabled = true }

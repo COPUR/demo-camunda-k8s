@@ -1,0 +1,99 @@
+# Adds the demo's service clients to realm camunda-platform once Management Identity has created it:
+#   svc-bpo-worker-payments  client credentials; default audience orchestration-api, optional audiences of the
+#                            four providers (requested per call through BPO_AUTH_SCOPE)
+#   demo-loader              client credentials; audience orchestration-api only
+# Re-running it is safe: existing scopes are kept and existing clients get the current secret. The Keycloak
+# image has bash but no awk or jq, so the script uses bash only.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-clients
+  namespace: bpo-demo-ms
+data:
+  clients.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    kc() { /opt/keycloak/bin/kcadm.sh "$@" --config /tmp/kcadm.config; }
+    realm=camunda-platform
+    until kc config credentials --server http://keycloak:18080/auth --realm master --user kc-admin --password "$KC_ADMIN_PASSWORD" >/dev/null 2>&1; do sleep 5; done
+    until kc get "realms/$realm" >/dev/null 2>&1; do echo "waiting for realm $realm"; sleep 5; done
+
+    scope() {
+      local name=$1 audience=$2 id
+      id=$(kc get client-scopes -r "$realm" --fields id,name --format csv --noquotes \
+        | while IFS=, read -r scope_id scope_name; do [ "$scope_name" = "$name" ] && echo "$scope_id"; done || true)
+      if [ -z "$id" ]; then
+        id=$(kc create client-scopes -r "$realm" -s name="$name" -s protocol=openid-connect -i)
+        kc create "client-scopes/$id/protocol-mappers/models" -r "$realm" -s name=audience -s protocol=openid-connect \
+          -s protocolMapper=oidc-audience-mapper -s 'config."included.custom.audience"='"$audience" \
+          -s 'config."access.token.claim"=true' -s 'config."id.token.claim"=false' >/dev/null
+      fi
+      echo "$id"
+    }
+
+    client() {
+      local client_id=$1 secret=$2 id
+      id=$(kc get clients -r "$realm" -q clientId="$client_id" --fields id --format csv --noquotes)
+      if [ -z "$id" ]; then
+        id=$(kc create clients -r "$realm" -s clientId="$client_id" -s publicClient=false -s serviceAccountsEnabled=true \
+          -s standardFlowEnabled=false -s directAccessGrantsEnabled=false -s implicitFlowEnabled=false -s secret="$secret" -i)
+      else
+        kc update "clients/$id" -r "$realm" -s secret="$secret"
+      fi
+      echo "$id"
+    }
+
+    orchestration=$(scope aud-orchestration-api orchestration-api)
+    worker=$(client svc-bpo-worker-payments "$WORKER_SECRET")
+    loader=$(client demo-loader "$LOADER_SECRET")
+    for id in "$worker" "$loader"; do kc update "clients/$id/default-client-scopes/$orchestration" -r "$realm"; done
+    for provider in svc-psg-tr svc-acc-accounts-ledger svc-pay-initiation-settlement svc-ntf; do
+      kc update "clients/$worker/optional-client-scopes/$(scope "aud-$provider" "$provider")" -r "$realm"
+    done
+    echo "service clients ready in realm $realm"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: keycloak-clients
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: keycloak-clients, app.kubernetes.io/part-of: bpo-demo}
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: keycloak-clients, app.kubernetes.io/part-of: bpo-demo}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: clients
+          image: keycloak/keycloak:26.7.5@sha256:37dbaf6f0722c9ec246335f36e1ef8b2e6cb960f7c27e0d8c615121a3d475a85
+          command: ["/bin/bash", "/scripts/clients.sh"]
+          env:
+            - {name: HOME, value: /tmp}
+            - name: KC_ADMIN_PASSWORD
+              valueFrom: {secretKeyRef: {name: demo-keycloak, key: admin-password}}
+            - name: WORKER_SECRET
+              valueFrom: {secretKeyRef: {name: demo-clients, key: svc-bpo-worker-payments}}
+            - name: LOADER_SECRET
+              valueFrom: {secretKeyRef: {name: demo-clients, key: demo-loader}}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: scripts, mountPath: /scripts}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: scripts
+          configMap: {name: keycloak-clients}
+        - {name: tmp, emptyDir: {}}

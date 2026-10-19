@@ -1,0 +1,431 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+                  xmlns:modeler="http://camunda.org/schema/modeler/1.0"
+                  id="Definitions_LibAwaitExternalStatus"
+                  targetNamespace="https://fintechbankx.example/bpo"
+                  exporter="fbx-bpo" exporterVersion="0.1.0"
+                  modeler:executionPlatform="Camunda Cloud"
+                  modeler:executionPlatformVersion="8.10.0">
+  <bpmn:error id="Error_StatusTimeout" name="Err_StatusTimeout" errorCode="Err_StatusTimeout" />
+  <bpmn:message id="Message_SchemeStatusReported" name="Msg_SchemeStatusReported">
+    <bpmn:extensionElements>
+      <zeebe:subscription correlationKey="=sourceRef" />
+    </bpmn:extensionElements>
+  </bpmn:message>
+  <!-- L3 (07 §3.2): the scheme status of an instruction the caller sent, read from the rail gateway (read only;
+       nothing is ever sent to the scheme again, 05 §6.4). The gateway's event is preferred and only wakes the
+       instance; each wake and each growing timer (psg-status-inquiry-policy) re-reads the gateway. Four reads
+       at most, unrolled so no timer sits in a loop (07 O4). Still pending after the last one: Err_StatusTimeout,
+       and the caller hands the case to people. Input rail and sourceRef (the caller's business key), output
+       schemeStatus (ACSC or RJCT). -->
+  <bpmn:process id="lib-await-external-status" name="Await external status (library)" isExecutable="true">
+    <bpmn:extensionElements>
+      <zeebe:versionTag value="0.1.0" />
+    </bpmn:extensionElements>
+    <bpmn:startEvent id="StartEvent_StatusRequested" name="Status requested">
+      <bpmn:outgoing>Flow_ToPolicy</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:businessRuleTask id="Task_RoutePolicy" name="Pick the inquiry policy">
+      <bpmn:extensionElements>
+        <zeebe:calledDecision decisionId="psg-status-inquiry-policy" resultVariable="statusPolicy" bindingType="versionTag" versionTag="0.1.0" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToPolicy</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToInquireFirst</bpmn:outgoing>
+    </bpmn:businessRuleTask>
+    <bpmn:serviceTask id="Task_InquireFirst" name="Read scheme status">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="psg.status-inquiry" retries="5" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToInquireFirst</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToFirstStatus</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="Gateway_FirstStatus" name="Still pending?" default="Flow_FirstKnown">
+      <bpmn:incoming>Flow_ToFirstStatus</bpmn:incoming>
+      <bpmn:outgoing>Flow_FirstPending</bpmn:outgoing>
+      <bpmn:outgoing>Flow_FirstKnown</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:eventBasedGateway id="Gateway_AwaitFirst" name="Await status">
+      <bpmn:incoming>Flow_FirstPending</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToReportedFirst</bpmn:outgoing>
+      <bpmn:outgoing>Flow_ToFirstWait</bpmn:outgoing>
+    </bpmn:eventBasedGateway>
+    <bpmn:intermediateCatchEvent id="Msg_StatusReportedFirst" name="Status reported">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:output source="=&#34;RECEIVED&#34;" target="statusSignal" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToReportedFirst</bpmn:incoming>
+      <bpmn:outgoing>Flow_ReportedFirstToJoin</bpmn:outgoing>
+      <bpmn:messageEventDefinition id="MessageEventDefinition_ReportedFirst" messageRef="Message_SchemeStatusReported" />
+    </bpmn:intermediateCatchEvent>
+    <bpmn:intermediateCatchEvent id="Timer_FirstWait" name="First wait over">
+      <bpmn:incoming>Flow_ToFirstWait</bpmn:incoming>
+      <bpmn:outgoing>Flow_FirstWaitToJoin</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="TimerEventDefinition_FirstWait">
+        <bpmn:timeDuration>=statusPolicy.firstWait</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:intermediateCatchEvent>
+    <bpmn:exclusiveGateway id="Gateway_JoinSecond">
+      <bpmn:incoming>Flow_ReportedFirstToJoin</bpmn:incoming>
+      <bpmn:incoming>Flow_FirstWaitToJoin</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToInquireSecond</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="Task_InquireSecond" name="Read scheme status again">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="psg.status-inquiry" retries="5" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToInquireSecond</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToSecondStatus</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="Gateway_SecondStatus" name="Still pending?" default="Flow_SecondKnown">
+      <bpmn:incoming>Flow_ToSecondStatus</bpmn:incoming>
+      <bpmn:outgoing>Flow_SecondPending</bpmn:outgoing>
+      <bpmn:outgoing>Flow_SecondKnown</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:eventBasedGateway id="Gateway_AwaitSecond" name="Await status">
+      <bpmn:incoming>Flow_SecondPending</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToReportedSecond</bpmn:outgoing>
+      <bpmn:outgoing>Flow_ToSecondWait</bpmn:outgoing>
+    </bpmn:eventBasedGateway>
+    <bpmn:intermediateCatchEvent id="Msg_StatusReportedSecond" name="Status reported">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:output source="=&#34;RECEIVED&#34;" target="statusSignal" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToReportedSecond</bpmn:incoming>
+      <bpmn:outgoing>Flow_ReportedSecondToJoin</bpmn:outgoing>
+      <bpmn:messageEventDefinition id="MessageEventDefinition_ReportedSecond" messageRef="Message_SchemeStatusReported" />
+    </bpmn:intermediateCatchEvent>
+    <bpmn:intermediateCatchEvent id="Timer_SecondWait" name="Second wait over">
+      <bpmn:incoming>Flow_ToSecondWait</bpmn:incoming>
+      <bpmn:outgoing>Flow_SecondWaitToJoin</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="TimerEventDefinition_SecondWait">
+        <bpmn:timeDuration>=statusPolicy.secondWait</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:intermediateCatchEvent>
+    <bpmn:exclusiveGateway id="Gateway_JoinThird">
+      <bpmn:incoming>Flow_ReportedSecondToJoin</bpmn:incoming>
+      <bpmn:incoming>Flow_SecondWaitToJoin</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToInquireThird</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="Task_InquireThird" name="Read scheme status a third time">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="psg.status-inquiry" retries="5" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToInquireThird</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToThirdStatus</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="Gateway_ThirdStatus" name="Still pending?" default="Flow_ThirdKnown">
+      <bpmn:incoming>Flow_ToThirdStatus</bpmn:incoming>
+      <bpmn:outgoing>Flow_ThirdPending</bpmn:outgoing>
+      <bpmn:outgoing>Flow_ThirdKnown</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:eventBasedGateway id="Gateway_AwaitThird" name="Await status">
+      <bpmn:incoming>Flow_ThirdPending</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToReportedThird</bpmn:outgoing>
+      <bpmn:outgoing>Flow_ToThirdWait</bpmn:outgoing>
+    </bpmn:eventBasedGateway>
+    <bpmn:intermediateCatchEvent id="Msg_StatusReportedThird" name="Status reported">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:output source="=&#34;RECEIVED&#34;" target="statusSignal" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToReportedThird</bpmn:incoming>
+      <bpmn:outgoing>Flow_ReportedThirdToJoin</bpmn:outgoing>
+      <bpmn:messageEventDefinition id="MessageEventDefinition_ReportedThird" messageRef="Message_SchemeStatusReported" />
+    </bpmn:intermediateCatchEvent>
+    <bpmn:intermediateCatchEvent id="Timer_ThirdWait" name="Third wait over">
+      <bpmn:incoming>Flow_ToThirdWait</bpmn:incoming>
+      <bpmn:outgoing>Flow_ThirdWaitToJoin</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="TimerEventDefinition_ThirdWait">
+        <bpmn:timeDuration>=statusPolicy.thirdWait</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:intermediateCatchEvent>
+    <bpmn:exclusiveGateway id="Gateway_JoinLast">
+      <bpmn:incoming>Flow_ReportedThirdToJoin</bpmn:incoming>
+      <bpmn:incoming>Flow_ThirdWaitToJoin</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToInquireLast</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="Task_InquireLast" name="Read scheme status a last time">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="psg.status-inquiry" retries="5" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToInquireLast</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToLastStatus</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="Gateway_LastStatus" name="Still pending?" default="Flow_LastKnown">
+      <bpmn:incoming>Flow_ToLastStatus</bpmn:incoming>
+      <bpmn:outgoing>Flow_LastPending</bpmn:outgoing>
+      <bpmn:outgoing>Flow_LastKnown</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="EndEvent_StatusTimeout" name="Status still unknown">
+      <bpmn:incoming>Flow_LastPending</bpmn:incoming>
+      <bpmn:errorEventDefinition id="ErrorEventDefinition_StatusTimeout" errorRef="Error_StatusTimeout" />
+    </bpmn:endEvent>
+    <bpmn:exclusiveGateway id="Gateway_JoinKnown">
+      <bpmn:incoming>Flow_FirstKnown</bpmn:incoming>
+      <bpmn:incoming>Flow_SecondKnown</bpmn:incoming>
+      <bpmn:incoming>Flow_ThirdKnown</bpmn:incoming>
+      <bpmn:incoming>Flow_LastKnown</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToStatusKnown</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="EndEvent_StatusKnown" name="Status known">
+      <bpmn:incoming>Flow_ToStatusKnown</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="Flow_ToPolicy" sourceRef="StartEvent_StatusRequested" targetRef="Task_RoutePolicy" />
+    <bpmn:sequenceFlow id="Flow_ToInquireFirst" sourceRef="Task_RoutePolicy" targetRef="Task_InquireFirst" />
+    <bpmn:sequenceFlow id="Flow_ToFirstStatus" sourceRef="Task_InquireFirst" targetRef="Gateway_FirstStatus" />
+    <bpmn:sequenceFlow id="Flow_FirstPending" name="PDNG" sourceRef="Gateway_FirstStatus" targetRef="Gateway_AwaitFirst">
+      <bpmn:conditionExpression>=schemeStatus = "PDNG"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_FirstKnown" name="ACSC or RJCT" sourceRef="Gateway_FirstStatus" targetRef="Gateway_JoinKnown" />
+    <bpmn:sequenceFlow id="Flow_ToReportedFirst" sourceRef="Gateway_AwaitFirst" targetRef="Msg_StatusReportedFirst" />
+    <bpmn:sequenceFlow id="Flow_ToFirstWait" sourceRef="Gateway_AwaitFirst" targetRef="Timer_FirstWait" />
+    <bpmn:sequenceFlow id="Flow_ReportedFirstToJoin" sourceRef="Msg_StatusReportedFirst" targetRef="Gateway_JoinSecond" />
+    <bpmn:sequenceFlow id="Flow_FirstWaitToJoin" sourceRef="Timer_FirstWait" targetRef="Gateway_JoinSecond" />
+    <bpmn:sequenceFlow id="Flow_ToInquireSecond" sourceRef="Gateway_JoinSecond" targetRef="Task_InquireSecond" />
+    <bpmn:sequenceFlow id="Flow_ToSecondStatus" sourceRef="Task_InquireSecond" targetRef="Gateway_SecondStatus" />
+    <bpmn:sequenceFlow id="Flow_SecondPending" name="PDNG" sourceRef="Gateway_SecondStatus" targetRef="Gateway_AwaitSecond">
+      <bpmn:conditionExpression>=schemeStatus = "PDNG"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_SecondKnown" name="ACSC or RJCT" sourceRef="Gateway_SecondStatus" targetRef="Gateway_JoinKnown" />
+    <bpmn:sequenceFlow id="Flow_ToReportedSecond" sourceRef="Gateway_AwaitSecond" targetRef="Msg_StatusReportedSecond" />
+    <bpmn:sequenceFlow id="Flow_ToSecondWait" sourceRef="Gateway_AwaitSecond" targetRef="Timer_SecondWait" />
+    <bpmn:sequenceFlow id="Flow_ReportedSecondToJoin" sourceRef="Msg_StatusReportedSecond" targetRef="Gateway_JoinThird" />
+    <bpmn:sequenceFlow id="Flow_SecondWaitToJoin" sourceRef="Timer_SecondWait" targetRef="Gateway_JoinThird" />
+    <bpmn:sequenceFlow id="Flow_ToInquireThird" sourceRef="Gateway_JoinThird" targetRef="Task_InquireThird" />
+    <bpmn:sequenceFlow id="Flow_ToThirdStatus" sourceRef="Task_InquireThird" targetRef="Gateway_ThirdStatus" />
+    <bpmn:sequenceFlow id="Flow_ThirdPending" name="PDNG" sourceRef="Gateway_ThirdStatus" targetRef="Gateway_AwaitThird">
+      <bpmn:conditionExpression>=schemeStatus = "PDNG"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_ThirdKnown" name="ACSC or RJCT" sourceRef="Gateway_ThirdStatus" targetRef="Gateway_JoinKnown" />
+    <bpmn:sequenceFlow id="Flow_ToReportedThird" sourceRef="Gateway_AwaitThird" targetRef="Msg_StatusReportedThird" />
+    <bpmn:sequenceFlow id="Flow_ToThirdWait" sourceRef="Gateway_AwaitThird" targetRef="Timer_ThirdWait" />
+    <bpmn:sequenceFlow id="Flow_ReportedThirdToJoin" sourceRef="Msg_StatusReportedThird" targetRef="Gateway_JoinLast" />
+    <bpmn:sequenceFlow id="Flow_ThirdWaitToJoin" sourceRef="Timer_ThirdWait" targetRef="Gateway_JoinLast" />
+    <bpmn:sequenceFlow id="Flow_ToInquireLast" sourceRef="Gateway_JoinLast" targetRef="Task_InquireLast" />
+    <bpmn:sequenceFlow id="Flow_ToLastStatus" sourceRef="Task_InquireLast" targetRef="Gateway_LastStatus" />
+    <bpmn:sequenceFlow id="Flow_LastPending" name="PDNG" sourceRef="Gateway_LastStatus" targetRef="EndEvent_StatusTimeout">
+      <bpmn:conditionExpression>=schemeStatus = "PDNG"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_LastKnown" name="ACSC or RJCT" sourceRef="Gateway_LastStatus" targetRef="Gateway_JoinKnown" />
+    <bpmn:sequenceFlow id="Flow_ToStatusKnown" sourceRef="Gateway_JoinKnown" targetRef="EndEvent_StatusKnown" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="lib-await-external-status">
+      <bpmndi:BPMNShape id="StartEvent_StatusRequested_di" bpmnElement="StartEvent_StatusRequested">
+        <dc:Bounds x="102" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RoutePolicy_di" bpmnElement="Task_RoutePolicy">
+        <dc:Bounds x="240" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_InquireFirst_di" bpmnElement="Task_InquireFirst">
+        <dc:Bounds x="410" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_FirstStatus_di" bpmnElement="Gateway_FirstStatus">
+        <dc:Bounds x="605" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_AwaitFirst_di" bpmnElement="Gateway_AwaitFirst">
+        <dc:Bounds x="775" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Msg_StatusReportedFirst_di" bpmnElement="Msg_StatusReportedFirst">
+        <dc:Bounds x="952" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Timer_FirstWait_di" bpmnElement="Timer_FirstWait">
+        <dc:Bounds x="952" y="252" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_JoinSecond_di" bpmnElement="Gateway_JoinSecond">
+        <dc:Bounds x="1115" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_InquireSecond_di" bpmnElement="Task_InquireSecond">
+        <dc:Bounds x="1260" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_SecondStatus_di" bpmnElement="Gateway_SecondStatus">
+        <dc:Bounds x="1455" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_AwaitSecond_di" bpmnElement="Gateway_AwaitSecond">
+        <dc:Bounds x="1625" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Msg_StatusReportedSecond_di" bpmnElement="Msg_StatusReportedSecond">
+        <dc:Bounds x="1802" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Timer_SecondWait_di" bpmnElement="Timer_SecondWait">
+        <dc:Bounds x="1802" y="252" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_JoinThird_di" bpmnElement="Gateway_JoinThird">
+        <dc:Bounds x="1965" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_InquireThird_di" bpmnElement="Task_InquireThird">
+        <dc:Bounds x="2110" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_ThirdStatus_di" bpmnElement="Gateway_ThirdStatus">
+        <dc:Bounds x="2305" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_AwaitThird_di" bpmnElement="Gateway_AwaitThird">
+        <dc:Bounds x="2475" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Msg_StatusReportedThird_di" bpmnElement="Msg_StatusReportedThird">
+        <dc:Bounds x="2652" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Timer_ThirdWait_di" bpmnElement="Timer_ThirdWait">
+        <dc:Bounds x="2652" y="252" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_JoinLast_di" bpmnElement="Gateway_JoinLast">
+        <dc:Bounds x="2815" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_InquireLast_di" bpmnElement="Task_InquireLast">
+        <dc:Bounds x="2960" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_LastStatus_di" bpmnElement="Gateway_LastStatus">
+        <dc:Bounds x="3155" y="95" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_StatusTimeout_di" bpmnElement="EndEvent_StatusTimeout">
+        <dc:Bounds x="3332" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_JoinKnown_di" bpmnElement="Gateway_JoinKnown">
+        <dc:Bounds x="3325" y="245" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_StatusKnown_di" bpmnElement="EndEvent_StatusKnown">
+        <dc:Bounds x="3502" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Flow_ToPolicy_di" bpmnElement="Flow_ToPolicy">
+        <di:waypoint x="120" y="120" />
+        <di:waypoint x="290" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToInquireFirst_di" bpmnElement="Flow_ToInquireFirst">
+        <di:waypoint x="290" y="120" />
+        <di:waypoint x="460" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToFirstStatus_di" bpmnElement="Flow_ToFirstStatus">
+        <di:waypoint x="460" y="120" />
+        <di:waypoint x="630" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_FirstPending_di" bpmnElement="Flow_FirstPending">
+        <di:waypoint x="630" y="120" />
+        <di:waypoint x="800" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_FirstKnown_di" bpmnElement="Flow_FirstKnown">
+        <di:waypoint x="630" y="120" />
+        <di:waypoint x="630" y="270" />
+        <di:waypoint x="3350" y="270" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToReportedFirst_di" bpmnElement="Flow_ToReportedFirst">
+        <di:waypoint x="800" y="120" />
+        <di:waypoint x="970" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToFirstWait_di" bpmnElement="Flow_ToFirstWait">
+        <di:waypoint x="800" y="120" />
+        <di:waypoint x="800" y="270" />
+        <di:waypoint x="970" y="270" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ReportedFirstToJoin_di" bpmnElement="Flow_ReportedFirstToJoin">
+        <di:waypoint x="970" y="120" />
+        <di:waypoint x="1140" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_FirstWaitToJoin_di" bpmnElement="Flow_FirstWaitToJoin">
+        <di:waypoint x="970" y="270" />
+        <di:waypoint x="970" y="120" />
+        <di:waypoint x="1140" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToInquireSecond_di" bpmnElement="Flow_ToInquireSecond">
+        <di:waypoint x="1140" y="120" />
+        <di:waypoint x="1310" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToSecondStatus_di" bpmnElement="Flow_ToSecondStatus">
+        <di:waypoint x="1310" y="120" />
+        <di:waypoint x="1480" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_SecondPending_di" bpmnElement="Flow_SecondPending">
+        <di:waypoint x="1480" y="120" />
+        <di:waypoint x="1650" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_SecondKnown_di" bpmnElement="Flow_SecondKnown">
+        <di:waypoint x="1480" y="120" />
+        <di:waypoint x="1480" y="270" />
+        <di:waypoint x="3350" y="270" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToReportedSecond_di" bpmnElement="Flow_ToReportedSecond">
+        <di:waypoint x="1650" y="120" />
+        <di:waypoint x="1820" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToSecondWait_di" bpmnElement="Flow_ToSecondWait">
+        <di:waypoint x="1650" y="120" />
+        <di:waypoint x="1650" y="270" />
+        <di:waypoint x="1820" y="270" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ReportedSecondToJoin_di" bpmnElement="Flow_ReportedSecondToJoin">
+        <di:waypoint x="1820" y="120" />
+        <di:waypoint x="1990" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_SecondWaitToJoin_di" bpmnElement="Flow_SecondWaitToJoin">
+        <di:waypoint x="1820" y="270" />
+        <di:waypoint x="1820" y="120" />
+        <di:waypoint x="1990" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToInquireThird_di" bpmnElement="Flow_ToInquireThird">
+        <di:waypoint x="1990" y="120" />
+        <di:waypoint x="2160" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToThirdStatus_di" bpmnElement="Flow_ToThirdStatus">
+        <di:waypoint x="2160" y="120" />
+        <di:waypoint x="2330" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ThirdPending_di" bpmnElement="Flow_ThirdPending">
+        <di:waypoint x="2330" y="120" />
+        <di:waypoint x="2500" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ThirdKnown_di" bpmnElement="Flow_ThirdKnown">
+        <di:waypoint x="2330" y="120" />
+        <di:waypoint x="2330" y="270" />
+        <di:waypoint x="3350" y="270" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToReportedThird_di" bpmnElement="Flow_ToReportedThird">
+        <di:waypoint x="2500" y="120" />
+        <di:waypoint x="2670" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToThirdWait_di" bpmnElement="Flow_ToThirdWait">
+        <di:waypoint x="2500" y="120" />
+        <di:waypoint x="2500" y="270" />
+        <di:waypoint x="2670" y="270" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ReportedThirdToJoin_di" bpmnElement="Flow_ReportedThirdToJoin">
+        <di:waypoint x="2670" y="120" />
+        <di:waypoint x="2840" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ThirdWaitToJoin_di" bpmnElement="Flow_ThirdWaitToJoin">
+        <di:waypoint x="2670" y="270" />
+        <di:waypoint x="2670" y="120" />
+        <di:waypoint x="2840" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToInquireLast_di" bpmnElement="Flow_ToInquireLast">
+        <di:waypoint x="2840" y="120" />
+        <di:waypoint x="3010" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToLastStatus_di" bpmnElement="Flow_ToLastStatus">
+        <di:waypoint x="3010" y="120" />
+        <di:waypoint x="3180" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_LastPending_di" bpmnElement="Flow_LastPending">
+        <di:waypoint x="3180" y="120" />
+        <di:waypoint x="3350" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_LastKnown_di" bpmnElement="Flow_LastKnown">
+        <di:waypoint x="3180" y="120" />
+        <di:waypoint x="3180" y="270" />
+        <di:waypoint x="3350" y="270" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToStatusKnown_di" bpmnElement="Flow_ToStatusKnown">
+        <di:waypoint x="3350" y="270" />
+        <di:waypoint x="3350" y="120" />
+        <di:waypoint x="3520" y="120" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

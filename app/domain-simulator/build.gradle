@@ -1,0 +1,5 @@
+description = 'Domain simulator - the provider contracts the onboarding workers call, as an in-process HTTP server'
+
+dependencies {
+    implementation 'tools.jackson.core:jackson-databind'
+}

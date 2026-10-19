@@ -1,0 +1,9 @@
+# Throwaway namespace of the local microservices demo (README.md). Pods must meet the restricted
+# Pod Security Standard.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bpo-demo-ms
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted

@@ -1,0 +1,9 @@
+# The Camunda 8.10 Helm chart this repo deploys (07 §1, C8-K1). The render check
+# (scripts/ci/camunda-chart-render.sh) downloads exactly this archive, refuses it
+# when the sha256 differs, and refuses any version outside the 15.x line.
+chart: camunda-platform
+version: 15.1.1
+versionRange: "15.x"
+appVersion: 8.10.x
+url: https://github.com/camunda/camunda-platform-helm/releases/download/camunda-platform-8.10-15.1.1/camunda-platform-15.1.1.tgz
+sha256: f8ea78ae9f003218958e9a81b725b47be57dfa3a844a81783f84e7d5e2585af2

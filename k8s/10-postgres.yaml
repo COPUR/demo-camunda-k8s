@@ -1,0 +1,91 @@
+# One PostgreSQL for the demo's stateful parts (Keycloak, Management Identity, Camunda Hub and the orchestration
+# cluster's secondary storage), one database and user each; passwords come from Secret demo-postgres (install.sh).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: bpo-demo-ms
+data:
+  10-databases.sh: |
+    #!/bin/sh
+    set -eu
+    for db in keycloak identity hub camunda; do
+      password=$(cat "/credentials/$db")
+      psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" -v name="$db" -v password="$password" <<'SQL'
+    CREATE USER :"name" WITH PASSWORD :'password';
+    CREATE DATABASE :"name" OWNER :"name";
+    SQL
+    done
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: postgres, app.kubernetes.io/part-of: bpo-demo}
+spec:
+  selector: {app.kubernetes.io/name: postgres}
+  ports:
+    - {name: postgres, port: 5432, targetPort: 5432}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: postgres, app.kubernetes.io/part-of: bpo-demo}
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: postgres}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: postgres, app.kubernetes.io/part-of: bpo-demo}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: postgres
+          image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+          env:
+            - {name: POSTGRES_USER, value: postgres}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: demo-postgres, key: postgres}}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+          ports:
+            - {name: postgres, containerPort: 5432}
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "postgres"]}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+            - {name: run, mountPath: /var/run/postgresql}
+            - {name: tmp, mountPath: /tmp}
+            - {name: init, mountPath: /docker-entrypoint-initdb.d}
+            - {name: credentials, mountPath: /credentials, readOnly: true}
+      volumes:
+        - {name: run, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
+        - name: init
+          configMap: {name: postgres-init, defaultMode: 0555}
+        - name: credentials
+          secret: {secretName: demo-postgres}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 2Gi}

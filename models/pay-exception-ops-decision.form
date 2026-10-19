@@ -1,0 +1,24 @@
+{
+  "id": "pay-exception-ops-decision",
+  "type": "default",
+  "schemaVersion": 16,
+  "components": [
+    {
+      "type": "text",
+      "id": "Field_PaymentHint",
+      "text": "Open payment {{paymentId}} in the payments operations view and check the scheme record there. This task holds no payment detail; record what the scheme shows."
+    },
+    {
+      "type": "radio",
+      "id": "Field_ExceptionDecision",
+      "key": "exceptionDecision",
+      "label": "Scheme record",
+      "validate": { "required": true },
+      "values": [
+        { "label": "Settled at the scheme", "value": "SETTLED" },
+        { "label": "Rejected at the scheme", "value": "REJECTED" },
+        { "label": "Escalate to the supervisor", "value": "ESCALATE" }
+      ]
+    }
+  ]
+}

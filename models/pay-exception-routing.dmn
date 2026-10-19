@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="https://www.omg.org/spec/DMN/20191111/MODEL/"
+             xmlns:modeler="http://camunda.org/schema/modeler/1.0"
+             xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+             id="Definitions_PayExceptionRouting" name="pay exception routing"
+             namespace="https://fintechbankx.example/bpo"
+             modeler:executionPlatform="Camunda Cloud"
+             modeler:executionPlatformVersion="8.10.0">
+  <!-- Routing only (05 §6.3 "vaka kuyruğu, SLA ve eskalasyon seviyeleri (P2, P3, P6)"): which payments operations
+       queue looks at an instant payment whose scheme status stayed unknown, and how long it may take. No amount,
+       limit or rail rule; the outcome of record is pay's. The SLAs are proposals until the first month's
+       measurement (05 §12). -->
+  <decision id="pay-exception-routing" name="Instant payment exception routing">
+    <extensionElements>
+      <zeebe:versionTag value="0.1.0" />
+    </extensionElements>
+    <decisionTable id="DecisionTable_ExceptionRouting" hitPolicy="FIRST">
+      <input id="Input_Jurisdiction" label="Jurisdiction">
+        <inputExpression id="InputExpression_Jurisdiction" typeRef="string">
+          <text>jurisdiction</text>
+        </inputExpression>
+      </input>
+      <input id="Input_Rail" label="Rail">
+        <inputExpression id="InputExpression_Rail" typeRef="string">
+          <text>rail</text>
+        </inputExpression>
+      </input>
+      <output id="Output_OpsQueue" label="Operations queue" name="opsQueue" typeRef="string" />
+      <output id="Output_OpsSla" label="Operations SLA" name="opsSla" typeRef="string" />
+      <output id="Output_SupervisorQueue" label="Supervisor queue" name="supervisorQueue" typeRef="string" />
+      <output id="Output_SupervisorSla" label="Supervisor SLA" name="supervisorSla" typeRef="string" />
+      <rule id="Rule_TrFast">
+        <inputEntry id="InputEntry_TrFast_J"><text>"TR"</text></inputEntry>
+        <inputEntry id="InputEntry_TrFast_R"><text>"FAST"</text></inputEntry>
+        <outputEntry id="OutputEntry_TrFast_Q"><text>"pay-tr-fast-ops"</text></outputEntry>
+        <outputEntry id="OutputEntry_TrFast_S"><text>"PT30M"</text></outputEntry>
+        <outputEntry id="OutputEntry_TrFast_SQ"><text>"pay-tr-fast-supervisor"</text></outputEntry>
+        <outputEntry id="OutputEntry_TrFast_SS"><text>"PT2H"</text></outputEntry>
+      </rule>
+      <rule id="Rule_Default">
+        <inputEntry id="InputEntry_Default_J"><text>-</text></inputEntry>
+        <inputEntry id="InputEntry_Default_R"><text>-</text></inputEntry>
+        <outputEntry id="OutputEntry_Default_Q"><text>"pay-ops-l1"</text></outputEntry>
+        <outputEntry id="OutputEntry_Default_S"><text>"PT1H"</text></outputEntry>
+        <outputEntry id="OutputEntry_Default_SQ"><text>"pay-ops-l2"</text></outputEntry>
+        <outputEntry id="OutputEntry_Default_SS"><text>"PT4H"</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+</definitions>

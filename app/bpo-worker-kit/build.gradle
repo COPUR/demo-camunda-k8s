@@ -1,0 +1,10 @@
+description = 'Worker kit - idempotency keys, output-variable guard, provider HTTP and error mapping'
+
+dependencies {
+    api 'io.camunda:camunda-spring-boot-starter'
+    implementation 'tools.jackson.core:jackson-databind'
+}
+
+dependencies {
+    testImplementation project(':domain-simulator')
+}

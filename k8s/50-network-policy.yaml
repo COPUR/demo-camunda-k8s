@@ -1,0 +1,140 @@
+# Network segmentation: nothing talks unless a policy below allows it. The browser-facing ports (Keycloak 18080,
+# orchestration 8080, Identity 8084, Hub 8081 and 8060) accept any in-cluster source; they are ClusterIP only and
+# reach the presenter's browser through open.sh, which binds them to 127.0.0.1. These policies are enforced only
+# by a network plugin that implements NetworkPolicy (k3s, kind with Calico); Docker Desktop's built-in
+# Kubernetes ignores them, so there the ClusterIP services and 127.0.0.1 port-forwards are the boundary.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: bpo-demo-ms}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-dns, namespace: bpo-demo-ms}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: camunda-platform, namespace: bpo-demo-ms}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/part-of: camunda-platform}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/part-of: camunda-platform}}
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: bpo-worker-payments}}
+        - podSelector: {matchLabels: {app.kubernetes.io/name: demo-loader}}
+      ports:
+        - {protocol: TCP, port: 8080}
+        - {protocol: TCP, port: 26500}
+    - ports:
+        - {protocol: TCP, port: 8080}
+        - {protocol: TCP, port: 8084}
+        - {protocol: TCP, port: 8081}
+        - {protocol: TCP, port: 8060}
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/part-of: camunda-platform}}
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: keycloak}}
+      ports:
+        - {protocol: TCP, port: 18080}
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: postgres}}
+      ports:
+        - {protocol: TCP, port: 5432}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: keycloak, namespace: bpo-demo-ms}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: keycloak}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - {protocol: TCP, port: 18080}
+        - {protocol: TCP, port: 8443}
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: postgres}}
+      ports:
+        - {protocol: TCP, port: 5432}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: postgres, namespace: bpo-demo-ms}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: postgres}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: keycloak}}
+        - podSelector: {matchLabels: {app.kubernetes.io/part-of: camunda-platform}}
+      ports:
+        - {protocol: TCP, port: 5432}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: provider-simulators, namespace: bpo-demo-ms}
+spec:
+  podSelector: {matchLabels: {bpo.demo/role: provider-simulator}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: bpo-worker-payments}}
+      ports:
+        - {protocol: TCP, port: 8443}
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: keycloak}}
+      ports:
+        - {protocol: TCP, port: 8443}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: bpo-worker-payments, namespace: bpo-demo-ms}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: bpo-worker-payments}}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - podSelector: {matchLabels: {bpo.demo/role: provider-simulator}}
+        - podSelector: {matchLabels: {app.kubernetes.io/name: keycloak}}
+      ports:
+        - {protocol: TCP, port: 8443}
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/component: zeebe-broker}}
+      ports:
+        - {protocol: TCP, port: 8080}
+        - {protocol: TCP, port: 26500}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: demo-jobs, namespace: bpo-demo-ms}
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [demo-loader, keycloak-clients]}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: keycloak}}
+      ports:
+        - {protocol: TCP, port: 18080}
+        - {protocol: TCP, port: 8443}
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/component: zeebe-broker}}
+      ports:
+        - {protocol: TCP, port: 8080}

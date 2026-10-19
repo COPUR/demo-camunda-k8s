@@ -1,0 +1,23 @@
+{
+  "id": "pay-exception-supervisor-decision",
+  "type": "default",
+  "schemaVersion": 16,
+  "components": [
+    {
+      "type": "text",
+      "id": "Field_PaymentHint",
+      "text": "Open payment {{paymentId}} in the payments operations view. Record the scheme record only when the scheme has confirmed it; pay checks the decision against the gateway's record."
+    },
+    {
+      "type": "radio",
+      "id": "Field_ExceptionDecision",
+      "key": "exceptionDecision",
+      "label": "Scheme record",
+      "validate": { "required": true },
+      "values": [
+        { "label": "Settled at the scheme", "value": "SETTLED" },
+        { "label": "Rejected at the scheme", "value": "REJECTED" }
+      ]
+    }
+  ]
+}

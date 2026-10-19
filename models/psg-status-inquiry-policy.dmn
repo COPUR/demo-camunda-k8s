@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="https://www.omg.org/spec/DMN/20191111/MODEL/"
+             xmlns:modeler="http://camunda.org/schema/modeler/1.0"
+             xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+             id="Definitions_PsgStatusInquiryPolicy" name="psg status inquiry policy"
+             namespace="https://fintechbankx.example/bpo"
+             modeler:executionPlatform="Camunda Cloud"
+             modeler:executionPlatformVersion="8.10.0">
+  <!-- Routing only (05 §6.3, 07 O4 and O12): how long lib-await-external-status waits for the scheme's answer
+       before it asks the gateway again. The intervals grow; there is no fixed polling loop. The values are the
+       examples of 05 §6.4 and 07 O4, not the scheme's SLA: TCMB has not published the FAST completion time
+       (08 §2.1), so they are set again from the certification documents. -->
+  <decision id="psg-status-inquiry-policy" name="Scheme status inquiry policy">
+    <extensionElements>
+      <zeebe:versionTag value="0.1.0" />
+    </extensionElements>
+    <decisionTable id="DecisionTable_StatusInquiryPolicy" hitPolicy="FIRST">
+      <input id="Input_Rail" label="Rail">
+        <inputExpression id="InputExpression_Rail" typeRef="string">
+          <text>rail</text>
+        </inputExpression>
+      </input>
+      <output id="Output_FirstWait" label="Wait before the second inquiry" name="firstWait" typeRef="string" />
+      <output id="Output_SecondWait" label="Wait before the third inquiry" name="secondWait" typeRef="string" />
+      <output id="Output_ThirdWait" label="Wait before the last inquiry" name="thirdWait" typeRef="string" />
+      <rule id="Rule_Fast">
+        <inputEntry id="InputEntry_Fast_R"><text>"FAST"</text></inputEntry>
+        <outputEntry id="OutputEntry_Fast_1"><text>"PT30S"</text></outputEntry>
+        <outputEntry id="OutputEntry_Fast_2"><text>"PT2M"</text></outputEntry>
+        <outputEntry id="OutputEntry_Fast_3"><text>"PT10M"</text></outputEntry>
+      </rule>
+      <rule id="Rule_Default">
+        <inputEntry id="InputEntry_Default_R"><text>-</text></inputEntry>
+        <outputEntry id="OutputEntry_Default_1"><text>"PT1M"</text></outputEntry>
+        <outputEntry id="OutputEntry_Default_2"><text>"PT5M"</text></outputEntry>
+        <outputEntry id="OutputEntry_Default_3"><text>"PT30M"</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+</definitions>

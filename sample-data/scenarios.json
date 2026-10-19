@@ -1,0 +1,11 @@
+{
+  "demo-tr-acsc-001": ["ACSC"],
+  "demo-tr-acsc-002": ["ACSC"],
+  "demo-tr-acsc-003": ["ACSC"],
+  "demo-tr-rjct-001": ["RJCT"],
+  "demo-tr-rjct-002": ["RJCT"],
+  "demo-tr-pdng-001": ["PDNG", "ACSC"],
+  "demo-tr-unres-001": ["PDNG"],
+  "demo-tr-unres-002": ["PDNG"],
+  "demo-tr-unres-003": ["PDNG"]
+}
