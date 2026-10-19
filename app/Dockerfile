@@ -6,8 +6,11 @@ WORKDIR /src
 # Behind a TLS-inspecting proxy, install.sh copies DEMO_BUILD_CA to .build-ca.crt (empty otherwise); every
 # certificate in it is trusted by this build stage only, for downloading Gradle and dependencies.
 COPY .build-ca.crt /tmp/build-ca.crt
-RUN if [ -s /tmp/build-ca.crt ]; then \
-      awk '/BEGIN CERT/{n++} {print > ("/tmp/build-ca-" n ".crt")}' /tmp/build-ca.crt; \
+# Only the BEGIN..END blocks are kept (a bundle may carry comments or subject lines), any keytool failure stops
+# the build, and a non-empty file with no certificate in it is an error rather than a silent no-op.
+RUN set -e; if [ -s /tmp/build-ca.crt ]; then \
+      awk '/-----BEGIN CERTIFICATE-----/{n++; p=1} p{print > ("/tmp/build-ca-" n ".crt")} /-----END CERTIFICATE-----/{p=0}' /tmp/build-ca.crt; \
+      ls /tmp/build-ca-*.crt >/dev/null 2>&1 || { echo "DEMO_BUILD_CA holds no PEM certificate" >&2; exit 1; }; \
       for f in /tmp/build-ca-*.crt; do \
         keytool -importcert -noprompt -cacerts -storepass changeit -alias "$(basename "$f" .crt)" -file "$f" >/dev/null; \
       done; \

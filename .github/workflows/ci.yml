@@ -16,7 +16,8 @@ jobs:
       - name: Shell scripts parse and pass shellcheck
         run: |
           for f in install.sh open.sh status.sh uninstall.sh lib/common.sh sample-data/load.sh; do bash -n "$f"; done
-          shellcheck -x -s bash install.sh open.sh status.sh uninstall.sh
+          shellcheck -x -s bash install.sh open.sh status.sh uninstall.sh lib/common.sh
+          shellcheck -s sh sample-data/load.sh
       - name: Manifests are valid YAML
         run: python3 -c 'import sys,yaml; [list(yaml.safe_load_all(open(f))) for f in sys.argv[1:]]' k8s/*.yaml helm/*.yaml
       - name: Pinned chart matches its sha256 and renders with the demo values

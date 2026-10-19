@@ -4,6 +4,7 @@
 #    context switch in another terminal mid-run cannot redirect them. Your own current context is left as it is.
 # 3. Knows how to hand the locally built image to the cluster's container runtime.
 
+# shellcheck disable=SC2034  # NS and IMAGE are read by the scripts that source this file
 NS=bpo-demo-ms
 IMAGE=bpo-payments-demo:local
 

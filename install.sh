@@ -47,7 +47,15 @@ actual=$( (sha256sum "$chart" 2>/dev/null || shasum -a 256 "$chart") | cut -d' '
 
 # --- 3. Application image, built inside Docker (no host JDK) ------------------------------------------------------
 info "building $IMAGE (first build downloads Gradle and dependencies, a few minutes)"
-if [ -n "${DEMO_BUILD_CA:-}" ]; then cp "$DEMO_BUILD_CA" .build-ca.crt; else : > .build-ca.crt; fi
+# .build-ca.crt lives only for the build; the EXIT trap removes it on success, failure and Ctrl-C alike.
+trap 'rm -rf "$DEMO_TMP" .build-ca.crt' EXIT
+if [ -n "${DEMO_BUILD_CA:-}" ]; then
+  grep -q -- '-----BEGIN CERTIFICATE-----' "$DEMO_BUILD_CA" 2>/dev/null \
+    || die "DEMO_BUILD_CA=$DEMO_BUILD_CA holds no PEM certificate"
+  cp "$DEMO_BUILD_CA" .build-ca.crt
+else
+  : > .build-ca.crt
+fi
 docker build -q --build-arg SKIP_TESTS="${DEMO_SKIP_TESTS:-false}" -f app/Dockerfile -t "$IMAGE" . >/dev/null
 rm -f .build-ca.crt
 load_image
@@ -55,19 +63,31 @@ load_image
 # --- 4. Namespace, credentials and TLS, all generated here and kept only in Secrets -------------------------------
 kubectl apply -f k8s/00-namespace.yaml >/dev/null
 secret_exists() { kubectl -n "$NS" get secret "$1" >/dev/null 2>&1; }
-random() { openssl rand -hex 24; }
+# new_secret NAME KEY... writes one random value per key into a private temporary file and creates the Secret
+# with --from-file, so no value ever appears on a command line (ps, /proc/<pid>/cmdline). The presenter password is
+# shorter so it can be typed.
+new_secret() {
+  local name="$1" key dir args=()
+  shift
+  secret_exists "$name" && return 0
+  dir=$(mktemp -d "$DEMO_TMP/secret.XXXXXX")
+  chmod 700 "$dir"
+  for key in "$@"; do
+    # printf is a shell builtin, so the value never reaches a process command line; no trailing newline.
+    if [ "$name" = demo-presenter ]; then printf '%s' "$(openssl rand -hex 12)" > "$dir/$key"
+    else printf '%s' "$(openssl rand -hex 24)" > "$dir/$key"; fi
+    args+=(--from-file="$key=$dir/$key")
+  done
+  kubectl -n "$NS" create secret generic "$name" "${args[@]}" >/dev/null
+  rm -rf "$dir"
+}
 info "credentials (generated once per namespace, never printed)"
-secret_exists demo-postgres || kubectl -n "$NS" create secret generic demo-postgres \
-  --from-literal=postgres="$(random)" --from-literal=keycloak="$(random)" --from-literal=identity="$(random)" \
-  --from-literal=hub="$(random)" --from-literal=camunda="$(random)" >/dev/null
-secret_exists demo-keycloak || kubectl -n "$NS" create secret generic demo-keycloak --from-literal=admin-password="$(random)" >/dev/null
-secret_exists demo-presenter || kubectl -n "$NS" create secret generic demo-presenter --from-literal=password="$(openssl rand -hex 12)" >/dev/null
-secret_exists demo-clients || kubectl -n "$NS" create secret generic demo-clients \
-  --from-literal=svc-bpo-worker-payments="$(random)" --from-literal=demo-loader="$(random)" >/dev/null
-secret_exists demo-pusher || kubectl -n "$NS" create secret generic demo-pusher \
-  --from-literal=app-key="$(random)" --from-literal=app-secret="$(random)" >/dev/null
-secret_exists demo-oidc || kubectl -n "$NS" create secret generic demo-oidc \
-  --from-literal=orchestration="$(random)" --from-literal=connectors="$(random)" >/dev/null
+new_secret demo-postgres postgres keycloak identity hub camunda
+new_secret demo-keycloak admin-password
+new_secret demo-presenter password
+new_secret demo-clients svc-bpo-worker-payments demo-loader
+new_secret demo-pusher app-key app-secret
+new_secret demo-oidc orchestration connectors
 
 # A demo CA (valid 7 days) and a server certificate for Keycloak and each simulated provider. keytool runs in the
 # runtime image, so the host needs no JDK.

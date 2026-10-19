@@ -348,7 +348,7 @@ girmez; `OutputVariables` bunları çalışma anında reddeder.
 | Ortam | Durum |
 |---|---|
 | k3s (Linux sandbox, `DEMO_CLUSTER=current`, `DEMO_IMAGE_LOAD` ile) | `./install.sh` baştan sona çalıştı; 14 pod çalışıyor, doğrulama 4 bloke tahsilini gördü |
-| Docker Desktop, kind modu (macOS) | Aynı manifestler ve imaj aktarımı önceki betiklerle çalıştı; `./install.sh` baştan sona henüz denenmedi |
+| Docker Desktop, kind modu (macOS) | Temiz klondan `./install.sh` baştan sona çalıştı (çıkış kodu 0); 12 pod çalışıyor, doğrulama 4 bloke tahsilini gördü |
 | Docker Desktop kubeadm modu, OrbStack, Rancher Desktop, minikube | Denenmedi |
 
 Süreler yaklaşıktır ve ağa, makineye göre değişir.
