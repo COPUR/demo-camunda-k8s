@@ -21,11 +21,12 @@ Yerel ve geçici bir demodur; yalnızca **sentetik veri** kullanır. Hedef üret
 4. [Kurulum akışı](#kurulum-akışı)
 5. [P2 süreci ve örnek veri](#p2-süreci-ve-örnek-veri)
 6. [Demo senaryosu](#demo-senaryosu)
-7. [Güvenlik modeli](#güvenlik-modeli)
-8. [Komutlar ve ayarlar](#komutlar-ve-ayarlar)
-9. [Sorun giderme](#sorun-giderme)
-10. [Depo yapısı](#depo-yapısı)
-11. [Hedef topolojiden farklar](#hedef-topolojiden-farklar)
+7. [Test durumu](#test-durumu)
+8. [Güvenlik modeli](#güvenlik-modeli)
+9. [Komutlar ve ayarlar](#komutlar-ve-ayarlar)
+10. [Sorun giderme](#sorun-giderme)
+11. [Depo yapısı](#depo-yapısı)
+12. [Hedef topolojiden farklar](#hedef-topolojiden-farklar)
 
 ---
 
@@ -34,7 +35,7 @@ Yerel ve geçici bir demodur; yalnızca **sentetik veri** kullanır. Hedef üret
 ```bash
 git clone https://github.com/COPUR/demo-camunda-k8s.git
 cd demo-camunda-k8s
-./install.sh          # ilk kurulum 10-15 dk: imajlar, Gradle ve Helm şeması iner
+./install.sh          # ilk kurulum uzun sürer (imajlar, Gradle, Helm şeması iner); süre makineye göre değişir
 ./open.sh             # ayrı bir terminalde açık bırakın; arayüzler yalnız 127.0.0.1'de
 ```
 
@@ -342,6 +343,18 @@ girmez; `OutputVariables` bunları çalışma anında reddeder.
 
 ---
 
+## Test durumu
+
+| Ortam | Durum |
+|---|---|
+| k3s (Linux sandbox, `DEMO_CLUSTER=current`, `DEMO_IMAGE_LOAD` ile) | `./install.sh` baştan sona çalıştı; 14 pod çalışıyor, doğrulama 4 bloke tahsilini gördü |
+| Docker Desktop, kind modu (macOS) | Aynı manifestler ve imaj aktarımı önceki betiklerle çalıştı; `./install.sh` baştan sona henüz denenmedi |
+| Docker Desktop kubeadm modu, OrbStack, Rancher Desktop, minikube | Denenmedi |
+
+Süreler yaklaşıktır ve ağa, makineye göre değişir.
+
+---
+
 ## Güvenlik modeli
 
 | Konu | Demoda |
@@ -351,7 +364,7 @@ girmez; `OutputVariables` bunları çalışma anında reddeder.
 | Servis girişi | Client credentials; sağlayıcı başına audience (`aud-svc-psg-tr`, `aud-svc-acc-accounts-ledger`, `aud-svc-pay-initiation-settlement`, `aud-svc-ntf`) |
 | Sağlayıcı tarafı | Simülatörler imza, issuer, süre, audience ve çağıranı (azp) doğrular |
 | Taşıma | Keycloak ve simülatörler HTTPS (7 günlük demo CA); Camunda ↔ Keycloak/PostgreSQL namespace içinde HTTP |
-| Ağ | Varsayılan ret NetworkPolicy, yalnız gereken akışlar |
+| Ağ | Varsayılan ret NetworkPolicy ve akış başına izinler. Tarayıcı portları (8080, 8084, 8081, 8060) ile Keycloak (18080, 8443) her kaynaktan, başka namespace'ler dahil, erişilebilir. Docker Desktop NetworkPolicy uygulamaz; orada sınır ClusterIP servisleri ve 127.0.0.1 port-forward'larıdır. |
 | Pod'lar | Restricted Pod Security, root değil, tüm capability'ler düşürülmüş |
 | Erişim | `open.sh` yalnızca 127.0.0.1'e bağlanır |
 | Küme | Betikler yalnızca API sunucusu bu makinede olan kümeye çalışır, kendi kubeconfig kopyasıyla |
@@ -373,6 +386,7 @@ girmez; `OutputVariables` bunları çalışma anında reddeder.
 | `DEMO_CLUSTER` | `auto` | `auto`: varsa `docker-desktop`, yoksa geçerli context · `docker-desktop` · `current` |
 | `DEMO_IMAGE_LOAD` | otomatik | İmajı kümeye aktaran komut (stdin'den arşiv okur), ör. `"kind load image-archive /dev/stdin"`, `"sudo k3s ctr images import -"` |
 | `DEMO_SKIP_TESTS` | `false` | `true`: imajı birim testleri koşmadan derler |
+| `DEMO_BUILD_CA` | boş | TLS denetleyen kurumsal proxy arkasında, imaj derlemesinin güveneceği CA dosyası (tek sertifika ya da paket) |
 
 Başka yerel kümeler (kind, k3s, minikube, OrbStack, Rancher Desktop): API sunucusu bu makinedeyse
 `DEMO_CLUSTER=current ./install.sh`.
@@ -386,6 +400,9 @@ Başka yerel kümeler (kind, k3s, minikube, OrbStack, Rancher Desktop): API sunu
 | Simülatör veya worker `ErrImageNeverPull` | Küme Docker'ın imajlarını görmüyor | Kind modu otomatik algılanır; başka kümelerde `DEMO_IMAGE_LOAD` verin |
 | Pod'lar `Pending` | Bellek yetersiz | Docker belleğini artırın veya kümedeki diğer iş yüklerini durdurun |
 | `helm ... --wait` zaman aşımı | İlk imaj indirmesi yavaş veya bellek yetersiz | `kubectl -n bpo-demo-ms get pods`, sonra `./install.sh` tekrar |
+| Derlemede `PKIX path building failed` | Kurumsal proxy TLS'i denetliyor | Proxy CA'sını `DEMO_BUILD_CA=/yol/ca.crt ./install.sh` ile verin |
+| `the payments worker has stalled ... restarting it once` | Worker ilk yüklemede bazen job almayı bırakıyor (incident yok, job'lar `CREATED`) | Kendiliğinden düzelir: install.sh worker'ı bir kez yeniden başlatır, açık job'lar devam eder. İkincisinde de 4 bloke yoksa hata verir. |
+| Pod'lar `Pending`, olayda `disk-pressure` | Docker'ın diski dolu | `docker system df`; gereksiz imajları temizleyin veya Docker disk sınırını artırın |
 | `chart sha256 mismatch` | İndirme bozuk | `.cache/` silip tekrar deneyin |
 | Giriş başarısız | Yanlış kullanıcı/şifre | Kullanıcı `presenter`; şifre Secret `demo-presenter` içinde |
 | Sertifika hatası (7 gün sonra) | Demo CA süresi doldu | `./uninstall.sh && ./install.sh` |

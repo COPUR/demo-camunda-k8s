@@ -1,0 +1,27 @@
+name: ci
+# Lint only; nothing here reaches a cluster. Never set the CI_RUNNER variable if this repository is made public:
+# fork pull requests would then run on that self-hosted machine.
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  lint:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - name: Shell scripts parse and pass shellcheck
+        run: |
+          for f in install.sh open.sh status.sh uninstall.sh lib/common.sh sample-data/load.sh; do bash -n "$f"; done
+          shellcheck -x -s bash install.sh open.sh status.sh uninstall.sh
+      - name: Manifests are valid YAML
+        run: python3 -c 'import sys,yaml; [list(yaml.safe_load_all(open(f))) for f in sys.argv[1:]]' k8s/*.yaml helm/*.yaml
+      - name: Pinned chart matches its sha256 and renders with the demo values
+        run: |
+          url=$(sed -n 's/^url: //p' helm/chart-lock.yaml); sha=$(sed -n 's/^sha256: //p' helm/chart-lock.yaml)
+          curl -sSfL -o chart.tgz "$url"
+          echo "$sha  chart.tgz" | sha256sum -c -
+          helm template camunda chart.tgz -n bpo-demo-ms -f helm/values-camunda.yaml > /dev/null

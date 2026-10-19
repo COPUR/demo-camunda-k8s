@@ -37,6 +37,24 @@ select_cluster() {
   fi
 }
 
+# Pins every later docker call to the Docker engine chosen now, as select_cluster does for kubectl: switching the
+# Docker context in another terminal mid-run cannot redirect the build or the image hand-off. A remote engine
+# (tcp://, ssh://) is refused, so the image and the generated certificates stay on this machine.
+pin_docker() {
+  local ctx endpoint
+  if [ -n "${DOCKER_HOST:-}" ]; then endpoint=$DOCKER_HOST; ctx="DOCKER_HOST"
+  else
+    ctx="${DOCKER_CONTEXT:-$(docker context show 2>/dev/null || echo default)}"
+    endpoint=$(docker context inspect "$ctx" --format '{{.Endpoints.docker.Host}}' 2>/dev/null) \
+      || die "docker context $ctx not found"
+    export DOCKER_CONTEXT="$ctx"
+  fi
+  case "$endpoint" in
+    unix://*|npipe://*) ;;
+    *) die "refusing: the Docker engine of $ctx ($endpoint) is not on this machine" ;;
+  esac
+}
+
 # Hands $IMAGE to the cluster. DEMO_IMAGE_LOAD (a command reading an image archive on stdin) wins; otherwise:
 #   a node that is itself a Docker container (Docker Desktop in kind mode, kind)  -> ctr import inside the node
 #   minikube                                                                       -> minikube image load
