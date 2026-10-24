@@ -1,0 +1,5 @@
+# Shell scripts, manifests and models run inside Linux containers and bash. A Windows clone with
+# core.autocrlf=true would otherwise turn them into CRLF and break them ($'\r': command not found).
+* text=auto eol=lf
+*.bat text eol=crlf
+*.jar binary
