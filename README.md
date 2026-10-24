@@ -377,8 +377,9 @@ Süreler yaklaşıktır ve ağa, makineye göre değişir.
 
 | Komut | Ne yapar |
 |---|---|
+| `./demo.sh up\|open\|login\|status\|down` | Tek giriş noktası: aşağıdaki betikleri çağırır; `login` presenter şifresini ekrana yazmadan panoya kopyalar |
 | `./install.sh` | Kurar veya günceller (tekrar çalıştırılabilir) |
-| `./open.sh` | Arayüzleri 127.0.0.1'de yayınlar; Ctrl-C ile kapanır |
+| `./open.sh` | Arayüzleri 127.0.0.1'de yayınlar; kopan bağlantıyı yeniden kurar, port doluysa başlamadan hata verir; Ctrl-C ile kapanır |
 | `./status.sh` | Pod'lar, yükleyici sonucu, simülatör sayaçları, worker uyarıları |
 | `./uninstall.sh` | Helm sürümünü ve namespace'i siler (veri ve Secret'lar dahil) |
 
@@ -420,6 +421,7 @@ kubectl -n bpo-demo-ms logs <pod> --tail=50
 ## Depo yapısı
 
 ```text
+demo.sh                tek giriş noktası (up · open · login · status · down)
 install.sh  open.sh  status.sh  uninstall.sh
 lib/common.sh          küme seçimi, yerel API koruması, imaj aktarımı
 helm/                  values-camunda.yaml, chart-lock.yaml (camunda-platform 15.1.1, sha256)

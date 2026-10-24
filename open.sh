@@ -7,8 +7,22 @@ cd "$(dirname "$0")"
 . lib/common.sh
 select_cluster
 pids=()
-forward() { kubectl -n "$NS" port-forward --address 127.0.0.1 "svc/$1" "$2" >/dev/null & pids+=($!); }
-trap 'kill "${pids[@]}" 2>/dev/null; rm -rf "$DEMO_TMP"' EXIT
+# Stop each loop and the kubectl it is running, then clean up.
+stop() { for p in "${pids[@]}"; do pkill -P "$p" 2>/dev/null || true; kill "$p" 2>/dev/null || true; done; rm -rf "$DEMO_TMP"; }
+trap stop EXIT
+# A port-forward ends when its pod restarts; each one runs in a loop that reconnects until Ctrl-C.
+forward() {
+  while true; do
+    kubectl -n "$NS" port-forward --address 127.0.0.1 "svc/$1" "$2" >/dev/null 2>&1 || true
+    sleep 2
+  done &
+  pids+=($!)
+}
+# Refuse to start when a local port is taken, instead of a forward that fails without a word.
+port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+for p in 18080 8080 8084 8070 8085; do
+  if port_busy "$p"; then die "port $p on 127.0.0.1 is already in use; stop that process first (is another ./open.sh running?)"; fi
+done
 forward keycloak 18080:18080
 forward camunda-zeebe-gateway 8080:8080
 forward camunda-identity 8084:80
