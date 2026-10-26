@@ -90,7 +90,16 @@ new_secret demo-pusher app-key app-secret
 new_secret demo-oidc orchestration connectors
 
 # A demo CA (valid 7 days) and a server certificate for Keycloak and each simulated provider. keytool runs in the
-# runtime image, so the host needs no JDK.
+# runtime image, so the host needs no JDK. A re-run renews them when the CA expires within a day, so a demo installed
+# days before the presentation still has valid certificates; the pods that mount them are restarted further down.
+tls_renewed=false
+if secret_exists demo-tls-ca && ! kubectl -n "$NS" get secret demo-tls-ca -o jsonpath='{.data.ca\.crt}' | base64 -d \
+    | openssl x509 -noout -checkend 86400 >/dev/null 2>&1; then
+  info "demo CA expires within a day; renewing it and the server certificates"
+  kubectl -n "$NS" delete secret demo-tls-ca demo-tls-keycloak demo-tls-sim-psg-tr demo-tls-sim-acc demo-tls-sim-pay \
+    demo-tls-sim-ntf --ignore-not-found >/dev/null
+  tls_renewed=true
+fi
 if ! secret_exists demo-tls-ca; then
   info "demo CA and server certificates"
   work="$DEMO_TMP/tls"; mkdir -m 700 "$work"
@@ -123,6 +132,7 @@ kubectl -n "$NS" create configmap demo-loader --from-file=sample-data/load.sh --
 info "PostgreSQL and Keycloak"
 kubectl apply -f k8s/50-network-policy.yaml -f k8s/10-postgres.yaml -f k8s/20-keycloak.yaml >/dev/null
 kubectl -n "$NS" rollout status statefulset/postgres --timeout=300s
+if [ "$tls_renewed" = true ]; then kubectl -n "$NS" rollout restart deployment/keycloak >/dev/null; fi
 kubectl -n "$NS" rollout status deployment/keycloak --timeout=600s
 
 # --- 7. Camunda 8.10 ----------------------------------------------------------------------------------------------
