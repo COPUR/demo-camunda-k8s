@@ -36,7 +36,7 @@ if [ -z "${vars:-}" ]; then
 else
   insts=$(api /v2/process-instances/search '{"filter":{"processDefinitionId":"pay-instant-exception"},"page":{"limit":100}}' || true)
   printf '%-20s %-34s %s\n' PAYMENT EXPECTED ACTUAL
-  for id in $(sed -n 's/^ *"\(demo-[a-z0-9-]*\)".*/\1/p' sample-data/scenarios.json); do
+  while read -r id; do
     case "$id" in
       demo-tr-acsc-*|demo-tr-pdng-*) expected="settled (COMPLETED)" ;;
       demo-tr-rjct-*)                expected="rejected (COMPLETED)" ;;
@@ -46,5 +46,5 @@ else
     key=$(printf '%s' "$vars" | tr '{' '\n' | grep "\"value\":\"\\\\\"$id\\\\\"\"" | sed -n 's/.*"processInstanceKey":"\{0,1\}\([0-9]*\).*/\1/p' | head -1)
     state=$(printf '%s' "$insts" | tr '{' '\n' | grep "\"processInstanceKey\":\"\{0,1\}$key\"\{0,1\}[,}]" | sed -n 's/.*"state":"\([A-Z_]*\)".*/\1/p' | head -1)
     printf '%-20s %-34s %s\n' "$id" "$expected" "${state:-not found}"
-  done
+  done < <(sed -n 's/^ *"\(demo-[a-z0-9-]*\)".*/\1/p' sample-data/scenarios.json)
 fi
