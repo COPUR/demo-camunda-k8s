@@ -4,8 +4,9 @@ P2 `pay-instant-exception` sürecinin **istisna vakaları** için REST API. Göv
 `application/x-protobuf` ve proto3 JSON eşlemesiyle `application/json`), alan olayları **Avro**. Vakanın kaydı
 Camunda'dadır (system of record): API kendi kopyasını tutmaz, süreç örneğini okur ve komutlarını motora iletir.
 
-Yalnızca sentetik veri (`demo-tr-*`). Üretim topolojisi değildir. Varsayılan `./demo.sh up` bu servisi kümeye
-kurmaz; imaj derlemesi modülü yalnızca derler ve test eder (bkz. [Bilinen sınırlar](#bilinen-sınırlar)).
+Yalnızca sentetik veri (`demo-tr-*`). Üretim topolojisi değildir. `./demo.sh up` servisi demo kümesine kurar ve
+son adımda gerçek token'larla dener; `./demo.sh api` onu demonun istemcileriyle çağırır (bkz.
+[Kubernetes'te](#kubernetesde)).
 
 ## İçindekiler
 
@@ -19,8 +20,9 @@ kurmaz; imaj derlemesi modülü yalnızca derler ve test eder (bkz. [Bilinen sı
 8. [AWS Well-Architected sütunları](#aws-well-architected-sütunları)
 9. [Dağıtık sistem kararları](#dağıtık-sistem-kararları)
 10. [Test ve kapsam](#test-ve-kapsam)
-11. [Yapılandırma](#yapılandırma)
-12. [Bilinen sınırlar](#bilinen-sınırlar)
+11. [Kubernetes'te](#kubernetesde)
+12. [Yapılandırma](#yapılandırma)
+13. [Bilinen sınırlar](#bilinen-sınırlar)
 
 ---
 
@@ -101,6 +103,7 @@ aynısı döner, yoksa üretilir.
 | `GET /exception-catalog` | `exceptions:read` | `If-None-Match` | `200` + `ETag: "catalog-<sürüm>"`, `Cache-Control: private, max-age=300` |
 | `GET /exception-catalog/cases/{code}` | `exceptions:read` | — | `200` |
 | `GET /exception-catalog/errors/{code}` | `exceptions:read` | — | `200` |
+| `GET /.well-known/oauth-protected-resource` | — | — | `200`, RFC 9728 kaynak meta verisi |
 | `GET /actuator/health/liveness`, `/readiness` (yönetim portu) | — | — | `200` |
 
 Vakanın `ETag`'i açık inceleme görevidir (`"rt-<userTaskKey>"`), görev yoksa durumudur. Karar, okunan görünümü
@@ -226,7 +229,10 @@ Tekrar denenebilir yanıtlar `Retry-After` taşır (`PEX-3007` 1 sn, `PEX-5004` 
 | Sentetik veri | `BPO_DEMO_ACK=synthetic-data-only` yoksa servis başlamaz; ödeme kimliği `demo-tr-*` dışındaysa reddedilir |
 | Gizli bilgi | Depoda ve imajda gizli bilgi yok; issuer, JWKS ve motor kimlik bilgileri ortamdan gelir |
 
-401 ve 403 yanıtları RFC 6750 `WWW-Authenticate: Bearer` başlığını taşır.
+401 ve 403 yanıtları RFC 6750 `WWW-Authenticate: Bearer` başlığını taşır. 401'deki `resource_metadata`
+parametresi RFC 9728 kaynak meta verisini gösterir (`GET /.well-known/oauth-protected-resource`, token
+gerektirmez): kaynak adı, yetkilendirme sunucusu (issuer), üç kapsam, token'ın yalnızca `Authorization`
+başlığında geldiği ve sertifikaya bağlı olmadığı.
 
 ## AWS Well-Architected sütunları
 
@@ -247,7 +253,10 @@ Tekrar denenebilir yanıtlar `Retry-After` taşır (`PEX-3007` 1 sn, `PEX-5004` 
 - **Idempotency.** Anahtar (işlem, çağıran) kapsamındadır; aynı anahtar ve aynı istek ilk yanıtı döner
   (`Idempotent-Replayed: true`), farklı istek `422 PEX-3006` alır, süren istek `409 PEX-3007`.
 - **Eşzamanlılık.** Aynı ödeme için kopya içinde kilit; kopyalar arası çit, ödeme kimliğinin süreç örneğinin
-  `businessId`'si olmasıdır (motor tekilliği zorlarsa ikinci örnek `409` alır ve `PEX-3002` olur).
+  `businessId`'si olmasıdır. Camunda 8.10 tekilliği varsayılan olarak zorlamaz; demonun motorunda
+  `CAMUNDA_PROCESSINSTANCECREATION_BUSINESSIDUNIQUENESSENABLED=true` açıktır ve ikinci örnek `409 ALREADY_EXISTS`
+  alır, API bunu `PEX-3002` yapar (`e2e/run.sh` gerçek motorda dener). Başka yerden businessId'siz açılmış örneği
+  (demonun yükleyicisi gibi) API açmadan önce değişken aramasıyla bulur.
 - **Tekrar deneme tek katmanda.** API kendi tekrarını yapmaz; Camunda istemcisinin HTTP katmanı 429 ve 503'ü bir
   kez 1 sn sonra yeniden gönderir, sonrası çağıranın işidir (`Retry-After`).
 - **Olaylar en az bir kez.** Outbox kuyruğa alır, tek iş parçacığı sırayla teslim eder; kayıt anahtarı ödeme
@@ -258,10 +267,12 @@ Tekrar denenebilir yanıtlar `Retry-After` taşır (`PEX-3007` 1 sn, `PEX-5004` 
 
 ```bash
 cd app && ./gradlew :payment-exception-api:check     # testler + JaCoCo kuralı (satır ve dal ≥ %87)
+app/payment-exception-api/e2e/run.sh                 # gerçek Camunda 8.10.4 ile uçtan uca testler (Docker gerekir)
 ```
 
-Son çalıştırma: 270 test, hepsi geçti; satır kapsamı %97,8, dal kapsamı %92,3 (üretilen protobuf kodu ve
-`main` sınıfı hariç). İmaj derlemesi (`app/Dockerfile`) testlerle birlikte bu kuralı da çalıştırır.
+Son çalıştırma (2026-11-02): 276 test, hepsi geçti; satır kapsamı %97,8, dal kapsamı %92,3 (üretilen protobuf
+kodu ve `main` sınıfı hariç). İmaj derlemesi (`app/Dockerfile`) testlerle birlikte bu kuralı da çalıştırır.
+Uçtan uca testler `e2e` etiketlidir ve `check`'e girmez; `e2e/run.sh` ile 4/4 geçti.
 
 | Katman | Testler |
 |---|---|
@@ -271,6 +282,26 @@ Son çalıştırma: 270 test, hepsi geçti; satır kapsamı %97,8, dal kapsamı 
 | Camunda | Gerçek `CamundaClient`, loopback'te betikli sahte motor: istek gövdeleri, durum eşleme, sayfalama, hata eşleme, zaman aşımı |
 | Olaylar | Avro gidiş-dönüş, single-object başlığı, şema uyumluluğu, `MockProducer`, outbox geri çekilmesi ve kapanış |
 | Uygunluk işlevleri | `ArchitectureTest` (hexagonal kurallar), `CatalogConsistencyTest` (kod ↔ katalog ↔ BPMN) |
+| Gerçek motor (`e2e`) | `RealEngineE2eTest`, `e2e/run.sh`'in Docker'da başlattığı Camunda 8.10.4'e karşı: yetkilendirme açık, businessId tekilliği açık, API'nin motor kimliği yalnızca dört P2 yetkisiyle. API'den açılan vaka ve tekrarı, ikinci açmaya `409 PEX-3002`, cevapsız şemada operasyon kuyruğu, `If-Match` ile karar ve eski etikete `412`, ödeme sonucu `SETTLED`; başka yerden açılmış örnekte belirsiz durum, eskalasyon, yanlış kuyruğa `403`, süpervizör kararı ve `REJECTED`; motorun ikinci örneği reddetmesi; kuyruğun sayfa sayfa okunması |
+
+Kümesiz entegrasyon denemesi (2026-11-02, Docker, demonun ayarlarıyla): Keycloak 26.7.5, OIDC ile Camunda 8.10.4
+(`helm/values-camunda.yaml`'daki yetki ve tekillik), API demonun manifestindeki ortam ve güvenlik bağlamıyla (root
+değil, salt okunur kök, capability yok). `keycloak-clients` betiği iki kez çalıştı; token'lar beklenen audience,
+kapsam ve grupları taşıdı; görevi CLIENT sahipli yetkiyle tamamlamak yetti; kurulum kontrolü (`api-check.sh`,
+sabit curl imajında) ve `./demo.sh api`'nin bütün komutları geçti.
+
+## Kubernetes'te
+
+`./demo.sh up` şunları kurar ve son adımda dener. Sırlar `install.sh`'in ürettiği `demo-api-clients` Secret'ındadır.
+
+| Parça | Dosya | İçerik |
+|---|---|---|
+| Deployment, Service | `k8s/45-payment-exception-api.yaml` | Tek kopya; aynı `bpo-payments-demo:local` imajındaki ayrı jar. HTTPS 8443 (demo CA'lı sertifika), yönetim portu 8081 yalnızca probe'lar için (o da HTTPS). Root değil, salt okunur kök, capability yok, 30 sn kapanış süresi |
+| Keycloak istemcileri | `k8s/30-keycloak-clients.yaml` | `svc-payment-exception-api` (motora gider, audience `orchestration-api`); `demo-exception-raiser`, `demo-ops-reviewer`, `demo-supervisor-reviewer` (audience `payment-exception-api`, kapsamlar `exceptions:read`, `exceptions:raise`, `exceptions:decide`, `groups` claim'i); gruplar `pay-tr-fast-ops`, `pay-tr-fast-supervisor` |
+| Camunda | `helm/values-camunda.yaml` (`orchestration.env`) | `svc-payment-exception-api` istemcisine P2'de yalnızca `CREATE_PROCESS_INSTANCE`, `READ_PROCESS_INSTANCE`, `READ_USER_TASK`, `COMPLETE_USER_TASK`; businessId tekilliği açık |
+| Ağ | `k8s/50-network-policy.yaml` | Girişte yalnızca `demo-api-check`; çıkışta Keycloak 8443 ve Camunda 8080/26500. `./demo.sh api`'nin port-forward'u pod'a doğrudan girer |
+| Kurulum kontrolü | `k8s/65-api-check-job.yaml`, `sample-data/api-check.sh` | Token'sız `401`, katalog, operasyon kuyruğu, `demo-tr-unres-001`, raiser'ın kararına `403`; vakaları değiştirmez |
+| Sunum istemcisi | `api.sh` (`./demo.sh api`) | Kuyruk, vaka, açma, karar, katalog; komutlar kök README'de |
 
 ## Yapılandırma
 
@@ -291,15 +322,20 @@ Ayrıntılar `config/ExceptionApiProperties` içindedir; geçersiz değerle serv
 
 ## Bilinen sınırlar
 
-- **Gerçek motora karşı denenmedi.** Camunda adaptörü gerçek istemciyle, 8.10 REST biçimini taklit eden bir sahte
-  sunucuya karşı test edildi. Şunlar çalışan bir kümede doğrulanmalı: değişken filtresinin JSON değer biçimi,
-  `businessId` tekilliğinin motorda açık olup olmadığı, API'nin servis hesabının kullanıcı görevini tamamlama yetkisi.
+- **Kümede baştan sona denenmedi.** Bu sürümle `./install.sh` bir kümede çalıştırılmadı; değişikliğin yapıldığı
+  ortamda yerel küme kurulamadı. Kümesiz denenenler [Test ve kapsam](#test-ve-kapsam) bölümündedir. Denenmeyenler:
+  Helm'in ürettiği yapılandırmayla Camunda (değerler şemanın iki JSON şemasına uyuyor, `helm template` CI'da
+  koşuyor), NetworkPolicy'lerin uygulanması, kubelet probe'ları.
 - **Belirsiz zaman aşımı.** Motor açma isteğini alıp yanıtı yetiştiremezse, aynı anahtarla tekrar ikinci bir
-  örnek açabilir; motorda `businessId` tekilliği bunu kapatır.
+  örnek açmaya çalışır; demonun motorunda açık olan businessId tekilliği bunu `409` ile keser. Tekilliği kapalı bir
+  motorda bu çit yoktur.
 - **Bellekte durum.** Idempotency kayıtları, okuma önbelleği, hız sınırı ve outbox kopya başınadır ve yeniden
   başlatmada kaybolur. Outbox kalıcı değildir: süreç ölürse kuyruktaki olaylar gider (kayıt motorda kalır).
   Kalıcı bir outbox (tablo ya da motorun exporter'ı) sonraki adımdır.
 - **Kararı veren kişi.** Görev API'nin servis hesabıyla tamamlanır; kararı kimin verdiği olayda (`actor`) ve
   log'dadır. Görevi tamamlamadan önce kişiye atamak sonraki adımdır.
-- **Küme kurulumu yok.** Kubernetes manifesti eklenmedi: Keycloak'ta bu API için istemci, audience eşleyicisi ve
-  üç kapsam, Camunda'da servis hesabı yetkisi ve NetworkPolicy gerekir; bunlar varsayılan kurulumu değiştirir.
+- **Tek kopya.** Bellekteki durum yüzünden Deployment tek kopyadır. İkinci bir kopya, tekrar gelen isteği yeni
+  sayar; motorun businessId tekilliği ve görev durumu yine de ikinci vakayı ya da kararı reddeder.
+- **Kuyruk üyeleri servis hesabı.** Demo tarayıcı akışı gerektirmesin diye `demo-ops-reviewer` ve
+  `demo-supervisor-reviewer` servis hesabıdır. Kişiler bir operasyon arayüzünden PKCE ile girer ve aynı audience,
+  kapsam ve grupları taşır.

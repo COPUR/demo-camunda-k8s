@@ -1,0 +1,48 @@
+# Checks payment-exception-api end to end in the cluster (sample-data/api-check.sh): real Keycloak tokens for two
+# demo callers, the API's own client towards Camunda, and the network policies between them. Read-only.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: demo-api-check
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: demo-api-check, app.kubernetes.io/part-of: bpo-demo}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: demo-api-check, app.kubernetes.io/part-of: bpo-demo}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: check
+          image: curlimages/curl:8.16.0@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6
+          command: ["sh", "/scripts/api-check.sh"]
+          env:
+            - {name: BPO_DEMO_TOKEN_URL, value: "https://keycloak:8443/auth/realms/camunda-platform/protocol/openid-connect/token"}
+            - name: RAISER_SECRET
+              valueFrom: {secretKeyRef: {name: demo-api-clients, key: demo-exception-raiser}}
+            - name: OPS_REVIEWER_SECRET
+              valueFrom: {secretKeyRef: {name: demo-api-clients, key: demo-ops-reviewer}}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: scripts, mountPath: /scripts}
+            - {name: tls, mountPath: /tls, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: scripts
+          configMap: {name: demo-api-check}
+        - name: tls
+          secret: {secretName: demo-tls-ca}
+        - {name: tmp, emptyDir: {}}

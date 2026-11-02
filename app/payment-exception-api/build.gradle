@@ -62,5 +62,28 @@ tasks.named('jacocoTestCoverageVerification') {
     }
 }
 
-tasks.named('test') { finalizedBy tasks.named('jacocoTestReport') }
+tasks.named('test') {
+    useJUnitPlatform { excludeTags 'e2e' }
+    finalizedBy tasks.named('jacocoTestReport')
+}
 tasks.named('check') { dependsOn tasks.named('jacocoTestCoverageVerification') }
+
+// The API against a real Camunda 8.10 engine, which e2e/run.sh starts in Docker and passes in as -De2e.* system
+// properties (addresses and the paths of password files, never a password). Not part of test or check.
+def e2eProperties = ['e2e.camunda.rest-address', 'e2e.camunda.grpc-address', 'e2e.camunda.admin-user',
+                     'e2e.camunda.admin-password-file', 'e2e.camunda.api-password-file', 'e2e.models']
+tasks.register('e2eTest', Test) {
+    description = 'Runs the tests tagged e2e against the engine that e2e/run.sh started.'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform { includeTags 'e2e' }
+    e2eProperties.each { name ->
+        def value = providers.systemProperty(name)
+        if (value.isPresent()) {
+            systemProperty name, value.get()
+        }
+    }
+    outputs.upToDateWhen { false }
+    testLogging { events 'passed', 'skipped', 'failed'; exceptionFormat 'full' }
+}

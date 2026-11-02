@@ -20,7 +20,7 @@ forward() {
 }
 # Refuse to start when a local port is taken, instead of a forward that fails without a word.
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
-for p in 18080 8080 8084 8070 8085; do
+for p in 18080 8080 8084 8070 8085 18443; do
   if port_busy "$p"; then die "port $p on 127.0.0.1 is already in use; stop that process first (is another ./open.sh running?)"; fi
 done
 forward keycloak 18080:18080
@@ -28,6 +28,8 @@ forward camunda-zeebe-gateway 8080:8080
 forward camunda-identity 8084:80
 forward camunda-web-modeler-restapi 8070:80
 forward camunda-web-modeler-websockets 8085:80
+forward payment-exception-api 18443:8443
 echo "Operate/Tasklist http://localhost:8080  Hub http://localhost:8070  Identity http://localhost:8084  Keycloak http://localhost:18080/auth"
+echo "Payment exception API https://localhost:18443 (demo CA; ./demo.sh api calls it with the demo's API clients)"
 echo "Ctrl-C to stop."
 wait

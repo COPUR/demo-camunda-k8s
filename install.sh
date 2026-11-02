@@ -2,7 +2,7 @@
 # One command for the Camunda 8.10 TR FAST demo on a local Kubernetes (README.md):
 #   preflight -> image build (inside Docker) -> image hand-off to the cluster -> credentials as Secrets
 #   -> PostgreSQL + Keycloak -> Camunda 8.10 (pinned Helm chart) -> Keycloak clients -> simulators + workers
-#   -> synthetic sample data -> verification.
+#   -> payment exception API -> synthetic sample data -> verification.
 # Safe to run again: existing Secrets are kept, everything else is applied idempotently.
 #
 #   DEMO_CLUSTER=auto|docker-desktop|current   which cluster (default auto, see lib/common.sh)
@@ -86,18 +86,24 @@ new_secret demo-postgres postgres keycloak identity hub camunda
 new_secret demo-keycloak admin-password
 new_secret demo-presenter password
 new_secret demo-clients svc-bpo-worker-payments demo-loader
+new_secret demo-api-clients svc-payment-exception-api demo-exception-raiser demo-ops-reviewer demo-supervisor-reviewer
 new_secret demo-pusher app-key app-secret
 new_secret demo-oidc orchestration connectors
 
-# A demo CA (valid 7 days) and a server certificate for Keycloak and each simulated provider. keytool runs in the
+# A demo CA (valid 7 days) and a server certificate for Keycloak, each simulated provider and the exception API. keytool runs in the
 # runtime image, so the host needs no JDK. A re-run renews them when the CA expires within a day, so a demo installed
 # days before the presentation still has valid certificates; the pods that mount them are restarted further down.
+# The CA's key is not kept, so a server added since the last install (payment-exception-api) can only get its
+# certificate from a new CA: a missing one renews them all, like an expiring CA does.
+tls_servers=(keycloak sim-psg-tr sim-acc sim-pay sim-ntf payment-exception-api)
 tls_renewed=false
-if secret_exists demo-tls-ca && ! kubectl -n "$NS" get secret demo-tls-ca -o jsonpath='{.data.ca\.crt}' | base64 -d \
-    | openssl x509 -noout -checkend 86400 >/dev/null 2>&1; then
-  info "demo CA expires within a day; renewing it and the server certificates"
-  kubectl -n "$NS" delete secret demo-tls-ca demo-tls-keycloak demo-tls-sim-psg-tr demo-tls-sim-acc demo-tls-sim-pay \
-    demo-tls-sim-ntf --ignore-not-found >/dev/null
+tls_missing=false
+for name in "${tls_servers[@]}"; do secret_exists "demo-tls-$name" || tls_missing=true; done
+if secret_exists demo-tls-ca && { [ "$tls_missing" = true ] \
+    || ! kubectl -n "$NS" get secret demo-tls-ca -o jsonpath='{.data.ca\.crt}' | base64 -d \
+    | openssl x509 -noout -checkend 86400 >/dev/null 2>&1; }; then
+  info "demo CA expires within a day or a server has no certificate yet; renewing the CA and every server certificate"
+  kubectl -n "$NS" delete secret demo-tls-ca "${tls_servers[@]/#/demo-tls-}" --ignore-not-found >/dev/null
   tls_renewed=true
 fi
 if ! secret_exists demo-tls-ca; then
@@ -112,7 +118,7 @@ if ! secret_exists demo-tls-ca; then
     -J-Dkeystore.pkcs12.certProtectionAlgorithm=NONE -J-Dkeystore.pkcs12.macAlgorithm=NONE -importcert -noprompt \
     -alias bpo-demo-ca -file /w/ca.crt -keystore /w/truststore.p12 -storetype PKCS12 -storepass:env DEMO_STOREPASS >/dev/null
   kubectl -n "$NS" create secret generic demo-tls-ca --from-file=ca.crt="$work/ca.crt" --from-file=truststore.p12="$work/truststore.p12" >/dev/null
-  for name in keycloak sim-psg-tr sim-acc sim-pay sim-ntf; do
+  for name in "${tls_servers[@]}"; do
     printf 'subjectAltName=DNS:%s,DNS:%s.%s.svc,DNS:%s.%s.svc.cluster.local\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature,keyEncipherment\n' \
       "$name" "$name" "$NS" "$name" "$NS" > "$work/$name.ext"
     openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/$name.key" 2>/dev/null
@@ -127,6 +133,7 @@ fi
 kubectl -n "$NS" create configmap demo-models --from-file=models/ --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n "$NS" create configmap demo-scenarios --from-file=sample-data/scenarios.json --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n "$NS" create configmap demo-loader --from-file=sample-data/load.sh --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl -n "$NS" create configmap demo-api-check --from-file=sample-data/api-check.sh --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 # --- 6. PostgreSQL and Keycloak ----------------------------------------------------------------------------------
 info "PostgreSQL and Keycloak"
@@ -145,11 +152,12 @@ kubectl -n "$NS" delete job keycloak-clients --ignore-not-found >/dev/null
 kubectl apply -f k8s/30-keycloak-clients.yaml >/dev/null
 kubectl -n "$NS" wait --for=condition=complete job/keycloak-clients --timeout=300s >/dev/null
 
-info "provider simulators and payments workers"
-kubectl apply -f k8s/40-services.yaml >/dev/null
+info "provider simulators, payments workers and the payment exception API"
+kubectl apply -f k8s/40-services.yaml -f k8s/45-payment-exception-api.yaml >/dev/null
 # A re-run with a rebuilt image must restart the pods, as the tag stays :local.
-kubectl -n "$NS" rollout restart deployment/sim-psg-tr deployment/sim-acc deployment/sim-pay deployment/sim-ntf deployment/bpo-worker-payments >/dev/null
-for d in sim-psg-tr sim-acc sim-pay sim-ntf bpo-worker-payments; do kubectl -n "$NS" rollout status "deployment/$d" --timeout=300s; done
+apps=(sim-psg-tr sim-acc sim-pay sim-ntf bpo-worker-payments payment-exception-api)
+kubectl -n "$NS" rollout restart "${apps[@]/#/deployment/}" >/dev/null
+for d in "${apps[@]}"; do kubectl -n "$NS" rollout status "deployment/$d" --timeout=300s; done
 
 # --- 9. Sample data and verification ------------------------------------------------------------------------------
 info "synthetic sample data (9 TR FAST payments)"
@@ -177,6 +185,16 @@ if ! wait_for_holds; then
 fi
 info "verified: acc simulator captured $(holds_captured) holds (expected 4 settled payments)"
 
+# The exception API with real tokens: Keycloak clients, scopes and groups, its own client towards Camunda and the
+# network policies (sample-data/api-check.sh, read-only).
+kubectl -n "$NS" delete job demo-api-check --ignore-not-found >/dev/null
+kubectl apply -f k8s/65-api-check-job.yaml >/dev/null
+if ! kubectl -n "$NS" wait --for=condition=complete job/demo-api-check --timeout=300s >/dev/null; then
+  kubectl -n "$NS" logs job/demo-api-check 2>/dev/null | tail -3 >&2 || true
+  die "the payment exception API check failed; see kubectl -n $NS logs deploy/payment-exception-api"
+fi
+info "$(kubectl -n "$NS" logs job/demo-api-check | tail -1)"
+
 cat <<MSG
 
 Demo is up on context $DEMO_CONTEXT, namespace $NS.
@@ -187,6 +205,9 @@ Then sign in with username "presenter":
   Tasklist  http://localhost:8080/tasklist
   Hub       http://localhost:8070
   Identity  http://localhost:8084
+The payment exception API as the demo's API clients (./demo.sh api lists every command):
+  ./demo.sh api queue          ./demo.sh api case demo-tr-unres-003
+  ./demo.sh api decide demo-tr-unres-003 ESCALATE      ./demo.sh api queue supervisor
 Read the generated password yourself:
   kubectl --context $DEMO_CONTEXT -n $NS get secret demo-presenter -o jsonpath='{.data.password}' | base64 -d; echo
 Health: ./status.sh     Remove everything: ./uninstall.sh

@@ -184,6 +184,31 @@ class CamundaExceptionCasesTest {
         assertThat(found.raisedAt()).isEqualTo(Instant.parse("2026-11-02T10:00:00Z"));
     }
 
+    /**
+     * Gateway_SchemeStatus sends every answer other than ACSC and RJCT to operations as unclear, including codes this
+     * context does not model (found against the real engine: RCVD read as a timeout). Only no answer at all is one.
+     */
+    @ParameterizedTest
+    @CsvSource(nullValues = "-", value = {
+        "-,    SCHEME_STATUS_TIMEOUT",
+        "PDNG, SCHEME_STATUS_UNCLEAR",
+        "RCVD, SCHEME_STATUS_UNCLEAR",
+        "ACCP, SCHEME_STATUS_UNCLEAR",
+    })
+    void anOperationsReviewIsUnclearUnlessTheSchemeNeverAnswered(String schemeStatus, ExceptionReason expected) {
+        Map<String, String> values = vars();
+        if (schemeStatus != null) {
+            values.put("schemeStatus", schemeStatus);
+        }
+        scriptInstance("ACTIVE", false, values);
+        engine.answer(USER_TASK_SEARCH, 200, page(List.of(userTask(TASK, INSTANCE, "Task_OpsReview", "pay-tr-fast-ops", null)), "c1"));
+
+        ExceptionCase found = cases.findByPaymentId(PAYMENT).orElseThrow();
+
+        assertThat(found.reason()).contains(expected);
+        assertThat(found.schemeStatus()).isEqualTo(Optional.ofNullable(schemeStatus).flatMap(SchemeStatus::of));
+    }
+
     @Test
     void aSupervisorTaskShowsWhyOperationsHandedItOn() {
         scriptInstance("ACTIVE", true, vars("exceptionDecision", "ESCALATE"));

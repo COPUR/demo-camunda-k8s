@@ -210,10 +210,11 @@ public final class CamundaExceptionCases implements ExceptionCaseRepository, Cas
 
     /**
      * Why people are (or were) looking at the case, from what the process recorded: no scheme status means the
-     * inquiry timed out, PDNG that it stayed unclear; at supervisor level, an ESCALATE decision means operations
-     * escalated, none that their SLA expired; EXPIRED that the supervisor's did too.
+     * inquiry timed out; any other answer than ACSC or RJCT (PDNG, or a code this context does not model, which
+     * Gateway_SchemeStatus also sends to operations) that it stayed unclear; at supervisor level, an ESCALATE decision
+     * means operations escalated, none that their SLA expired; EXPIRED that the supervisor's did too.
      */
-    static Optional<ExceptionReason> reason(CaseState state, Optional<ReviewTask> review, Optional<SchemeStatus> schemeStatus,
+    static Optional<ExceptionReason> reason(CaseState state, Optional<ReviewTask> review, Optional<String> reportedStatus,
                                             Optional<Decision> decision) {
         if (decision.isPresent() && decision.get() == Decision.EXPIRED) {
             return Optional.of(ExceptionReason.SUPERVISOR_SLA_EXPIRED);
@@ -228,10 +229,11 @@ public final class CamundaExceptionCases implements ExceptionCaseRepository, Cas
         if (state == CaseState.AWAITING_SCHEME_STATUS) {
             return Optional.empty();
         }
-        if (schemeStatus.isEmpty()) {
+        if (reportedStatus.isEmpty()) {
             return Optional.of(ExceptionReason.SCHEME_STATUS_TIMEOUT);
         }
-        return schemeStatus.get() == SchemeStatus.PDNG ? Optional.of(ExceptionReason.SCHEME_STATUS_UNCLEAR) : Optional.empty();
+        boolean finalAnswer = SchemeStatus.of(reportedStatus.get()).filter(status -> status != SchemeStatus.PDNG).isPresent();
+        return finalAnswer ? Optional.empty() : Optional.of(ExceptionReason.SCHEME_STATUS_UNCLEAR);
     }
 
     private ExceptionCase project(ProcessInstance instance, Map<String, String> variables, CaseState state, Optional<ReviewTask> review) {
@@ -242,8 +244,8 @@ public final class CamundaExceptionCases implements ExceptionCaseRepository, Cas
             Optional<Outcome> outcome = state.terminal() ? Outcome.of(variables.get("exceptionOutcome")) : Optional.empty();
             Instant raisedAt = Optional.ofNullable(instance.getStartDate()).map(OffsetDateTime::toInstant).orElse(Instant.EPOCH);
             return new ExceptionCase(PaymentId.of(paymentId), Jurisdiction.of(variables.get("jurisdiction")), Rail.of(variables.get("rail")), state,
-                schemeStatus, reason(state, review, schemeStatus, decision), review, decision, outcome, Boolean.TRUE.equals(instance.getHasIncident()),
-                raisedAt, instance.getProcessInstanceKey());
+                schemeStatus, reason(state, review, Optional.ofNullable(variables.get("schemeStatus")), decision), review, decision, outcome,
+                Boolean.TRUE.equals(instance.getHasIncident()), raisedAt, instance.getProcessInstanceKey());
         } catch (DomainException | IllegalArgumentException | NullPointerException e) {
             throw new DomainException(ErrorCode.WORKFLOW_REJECTED,
                 "process instance " + instance.getProcessInstanceKey() + " does not hold a case this API can read", e);

@@ -8,6 +8,7 @@ import com.bank.bpo.exceptions.domain.shared.ErrorCode;
 import jakarta.servlet.DispatcherType;
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.List;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.ssl.SslBundles;
 import org.springframework.context.annotation.Bean;
@@ -40,6 +41,11 @@ public class SecurityConfiguration {
     static final String READ = "SCOPE_exceptions:read";
     static final String RAISE = "SCOPE_exceptions:raise";
     static final String DECIDE = "SCOPE_exceptions:decide";
+
+    /** The OAuth scope behind an authority: SCOPE_exceptions:read is the scope exceptions:read. */
+    static String scopeName(String authority) {
+        return authority.substring("SCOPE_".length());
+    }
 
     @Bean
     JwtPrincipals jwtPrincipals(ExceptionApiProperties properties) {
@@ -83,6 +89,13 @@ public class SecurityConfiguration {
                 .anyRequest().denyAll())
             .oauth2ResourceServer(oauth -> oauth
                 .jwt(jwt -> { })
+                // RFC 9728 document the 401 challenge points at: where tokens come from and which scopes exist.
+                // This API does not bind tokens to client certificates, so it must not advertise that it does.
+                .protectedResourceMetadata(metadata -> metadata.protectedResourceMetadataCustomizer(document -> document
+                    .resourceName("Payment exception API")
+                    .authorizationServer(properties.security().issuer())
+                    .scopes(scopes -> scopes.addAll(List.of(scopeName(READ), scopeName(RAISE), scopeName(DECIDE))))
+                    .tlsClientCertificateBoundAccessTokens(false)))
                 .authenticationEntryPoint(unauthenticated)
                 .accessDeniedHandler(forbidden))
             .exceptionHandling(handling -> handling

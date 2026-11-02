@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One entry point for the demo: ./demo.sh up | open | login | status | down
+# One entry point for the demo: ./demo.sh up | open | login | status | api | down
 # The other scripts keep working on their own; this only dispatches to them.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -28,6 +28,7 @@ case "${1:-}" in
   open)   ./open.sh ;;
   login)  login ;;
   status) ./status.sh ;;
+  api)    shift; exec ./api.sh "$@" ;;
   down)   ./uninstall.sh ;;
-  *) echo "usage: ./demo.sh up|open|login|status|down" >&2; exit 2 ;;
+  *) echo "usage: ./demo.sh up|open|login|status|api|down (./demo.sh api lists its commands)" >&2; exit 2 ;;
 esac
