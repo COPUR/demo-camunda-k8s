@@ -192,6 +192,14 @@ final class FakeEngine implements AutoCloseable {
         return task;
     }
 
+    /** A task that is no longer open, as the search shows it once its end (or the step towards it) is exported. */
+    static Map<String, Object> endedUserTask(long taskKey, long instanceKey, String elementId, String state) {
+        Map<String, Object> task = userTask(taskKey, instanceKey, elementId, null, null);
+        task.put("state", state);
+        task.put("completionDate", "2026-11-02T10:20:00.000Z");
+        return task;
+    }
+
     static Map<String, Object> variable(long instanceKey, long scopeKey, String name, String value) {
         Map<String, Object> variable = new LinkedHashMap<>();
         variable.put("name", name);

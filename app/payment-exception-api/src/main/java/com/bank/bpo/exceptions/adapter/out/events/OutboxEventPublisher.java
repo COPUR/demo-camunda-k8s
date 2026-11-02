@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.DoubleSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 /**
  * Decouples the request from the broker: {@link #publish} only queues, so a slow or absent broker never fails or
@@ -31,6 +32,8 @@ public final class OutboxEventPublisher implements DomainEventPublisher, AutoClo
 
     private static final Logger log = LoggerFactory.getLogger(OutboxEventPublisher.class);
     private static final Duration DRAIN_ON_CLOSE = Duration.ofSeconds(10);
+    /** The log context key logging.pattern.correlation reads; the HTTP edge sets it for the request's thread. */
+    private static final String LOG_CONTEXT_KEY = "interactionId";
 
     private final BlockingQueue<DomainEvent> queue;
     private final EventSink sink;
@@ -118,8 +121,17 @@ public final class OutboxEventPublisher implements DomainEventPublisher, AutoClo
         }
     }
 
-    /** Delivers one event, retrying until it is taken; false when the outbox was closed before it could be. */
+    /**
+     * Delivers one event, retrying until it is taken; false when the outbox was closed before it could be. Its lines
+     * are logged under the interaction id of the request the event came from, as that request's own lines are.
+     */
     boolean deliver(DomainEvent event) throws InterruptedException {
+        try (MDC.MDCCloseable ignored = MDC.putCloseable(LOG_CONTEXT_KEY, event.interactionId().value())) {
+            return attempt(event);
+        }
+    }
+
+    private boolean attempt(DomainEvent event) throws InterruptedException {
         Duration backoff = initialBackoff;
         for (int attempt = 1; ; attempt++) {
             try {

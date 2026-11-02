@@ -7,6 +7,7 @@ import static com.bank.bpo.exceptions.adapter.out.camunda.FakeEngine.USER_TASK_S
 import static com.bank.bpo.exceptions.adapter.out.camunda.FakeEngine.VARIABLE_SEARCH;
 import static com.bank.bpo.exceptions.adapter.out.camunda.FakeEngine.created;
 import static com.bank.bpo.exceptions.adapter.out.camunda.FakeEngine.elementInstance;
+import static com.bank.bpo.exceptions.adapter.out.camunda.FakeEngine.endedUserTask;
 import static com.bank.bpo.exceptions.adapter.out.camunda.FakeEngine.instance;
 import static com.bank.bpo.exceptions.adapter.out.camunda.FakeEngine.page;
 import static com.bank.bpo.exceptions.adapter.out.camunda.FakeEngine.problem;
@@ -15,6 +16,7 @@ import static com.bank.bpo.exceptions.adapter.out.camunda.FakeEngine.variable;
 import static com.bank.bpo.exceptions.adapter.out.camunda.FakeEngine.variables;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 import com.bank.bpo.exceptions.application.port.in.CasePage;
 import com.bank.bpo.exceptions.application.port.in.CaseQuery;
@@ -41,6 +43,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -213,7 +216,8 @@ class CamundaExceptionCasesTest {
     void aSupervisorTaskShowsWhyOperationsHandedItOn() {
         scriptInstance("ACTIVE", true, vars("exceptionDecision", "ESCALATE"));
         engine.answer(USER_TASK_SEARCH, 200,
-            page(List.of(userTask(TASK, INSTANCE, "Task_SupervisorReview", "pay-tr-fast-supervisor", "sup.mehmet")), "c1"));
+            page(List.of(userTask(TASK + 1, INSTANCE, "Task_SupervisorReview", "pay-tr-fast-supervisor", "sup.mehmet")), "c1"));
+        engine.answer(USER_TASK_SEARCH, 200, page(List.of(endedUserTask(TASK, INSTANCE, "Task_OpsReview", "COMPLETED")), "c2"));
 
         ExceptionCase escalated = cases.findByPaymentId(PAYMENT).orElseThrow();
 
@@ -221,6 +225,68 @@ class CamundaExceptionCasesTest {
         assertThat(escalated.decision()).contains(Decision.ESCALATE);
         assertThat(escalated.incident()).isTrue();
         assertThat(escalated.openReview().orElseThrow().assignee()).contains("sup.mehmet");
+    }
+
+    /**
+     * Why a supervisor looks at the case comes from how the operations review ended: completed is an escalation
+     * (Gateway_OpsDecision sends nothing else on), canceled is the operations SLA's boundary event. It is read after
+     * the supervisor's task, and the variables after both: the operations task ended before the supervisor's began,
+     * so a read that shows the later task shows how the earlier one ended. The decision variable, read first, was not
+     * enough: it could miss an ESCALATE that the task search already showed, and the case read as an expired SLA for a
+     * moment (the real-engine test caught it). With no ended operations review in sight, only ESCALATE says why.
+     */
+    @ParameterizedTest
+    @CsvSource(nullValues = "-", value = {
+        "COMPLETED,  -,        OPERATIONS_ESCALATION",
+        "COMPLETED,  ESCALATE, OPERATIONS_ESCALATION",
+        "CANCELED,   -,        OPERATIONS_SLA_EXPIRED",
+        "-,          ESCALATE, OPERATIONS_ESCALATION",
+        "-,          -,        -",
+        "COMPLETING, -,        -",
+    })
+    void aSupervisorReviewSaysWhyFromHowTheOperationsReviewEnded(String opsTaskState, String decision, ExceptionReason expected) {
+        scriptInstance("ACTIVE", false, decision == null ? vars() : vars("exceptionDecision", decision));
+        engine.answer(USER_TASK_SEARCH, 200,
+            page(List.of(userTask(TASK + 1, INSTANCE, "Task_SupervisorReview", "pay-tr-fast-supervisor", null)), "c1"));
+        engine.answer(USER_TASK_SEARCH, 200, opsTaskState == null ? page(List.of(), null)
+            : page(List.of(endedUserTask(TASK, INSTANCE, "Task_OpsReview", opsTaskState)), "c2"));
+
+        ExceptionCase found = cases.findByPaymentId(PAYMENT).orElseThrow();
+
+        assertThat(found.openReview().orElseThrow().level()).isEqualTo(ReviewLevel.SUPERVISOR);
+        assertThat(found.reason()).isEqualTo(Optional.ofNullable(expected));
+        assertThat(engine.calls.stream().map(call -> call.method() + " " + call.path()))
+            .containsExactly(PROCESS_INSTANCE_SEARCH, USER_TASK_SEARCH, USER_TASK_SEARCH, VARIABLE_SEARCH);
+        JsonNode opsFilter = json(engine.calls(USER_TASK_SEARCH).get(1).body()).get("filter");
+        assertThat(opsFilter.get("elementId").asString()).isEqualTo("Task_OpsReview");
+        assertThat(opsFilter.get("processInstanceKey").toString()).contains(Long.toString(INSTANCE));
+    }
+
+    @Test
+    void theSupervisorQueueSaysWhyEachCaseIsThereFromItsOperationsReview() {
+        long second = INSTANCE + 1;
+        engine.answer(USER_TASK_SEARCH, 200, page(List.of(
+            userTask(TASK + 10, INSTANCE, "Task_SupervisorReview", "pay-tr-fast-supervisor", null),
+            userTask(TASK + 11, second, "Task_SupervisorReview", "pay-tr-fast-supervisor", null)), null));
+        engine.answer(USER_TASK_SEARCH, 200, page(List.of(
+            endedUserTask(TASK, INSTANCE, "Task_OpsReview", "COMPLETED"),
+            endedUserTask(TASK + 1, second, "Task_OpsReview", "CANCELED")), null));
+        engine.answer(PROCESS_INSTANCE_SEARCH, 200, page(List.of(instance(INSTANCE, "ACTIVE", false), instance(second, "ACTIVE", false)), "c1"));
+        List<Map<String, Object>> values = new ArrayList<>(variables(INSTANCE, vars("schemeStatus", "RCVD")));
+        values.addAll(variables(second, vars("paymentId", "demo-tr-unres-502", "schemeStatus", "RCVD")));
+        engine.answer(VARIABLE_SEARCH, 200, page(values, "c1"));
+
+        CasePage page = cases.findInReview(CaseQuery.firstPage(Optional.of(QueueName.of("pay-tr-fast-supervisor")),
+            Optional.of(ReviewLevel.SUPERVISOR), 5));
+
+        assertThat(page.items()).extracting(item -> item.paymentId().value(), item -> item.reason().orElseThrow()).containsExactly(
+            tuple(PAYMENT.value(), ExceptionReason.OPERATIONS_ESCALATION),
+            tuple("demo-tr-unres-502", ExceptionReason.OPERATIONS_SLA_EXPIRED));
+        assertThat(engine.calls.stream().map(call -> call.method() + " " + call.path()))
+            .containsExactly(USER_TASK_SEARCH, USER_TASK_SEARCH, PROCESS_INSTANCE_SEARCH, VARIABLE_SEARCH);
+        JsonNode opsFilter = json(engine.calls(USER_TASK_SEARCH).get(1).body()).get("filter");
+        assertThat(opsFilter.get("elementId").asString()).isEqualTo("Task_OpsReview");
+        assertThat(opsFilter.get("processInstanceKey").toString()).contains(Long.toString(INSTANCE), Long.toString(second));
     }
 
     @Test

@@ -1,6 +1,7 @@
 name: ci
-# Lint only; nothing here reaches a cluster. Never set the CI_RUNNER variable if this repository is made public:
-# fork pull requests would then run on that self-hosted machine.
+# Lint, and the build and tests of app/; nothing here reaches a cluster. Never set the CI_RUNNER variable if this
+# repository is made public: fork pull requests, whose build scripts the java job runs, would then run on that
+# self-hosted machine. No job keeps the checkout's token (persist-credentials: false).
 on:
   pull_request:
   push:
@@ -13,6 +14,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
       - name: Shell scripts parse and pass shellcheck
         run: |
           for f in demo.sh install.sh open.sh status.sh uninstall.sh api.sh lib/common.sh app/payment-exception-api/e2e/run.sh \
@@ -46,3 +49,36 @@ jobs:
           curl -sSfL -o chart.tgz "$url"
           echo "$sha  chart.tgz" | sha256sum -c -
           helm template camunda chart.tgz -n bpo-demo-ms -f helm/values-camunda.yaml > /dev/null
+
+  java:
+    # Every Gradle project in app/ with the JDK the image builds with (Temurin 23.0.2+7, app/Dockerfile): unit, web,
+    # contract and architecture tests and the payment exception API's 87 % coverage rule. The real-engine tests
+    # (app/payment-exception-api/e2e/run.sh) need Docker and a Camunda image, so they stay a manual step.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '23.0.2+7'
+          cache: gradle
+      - name: Build, test and check coverage
+        working-directory: app
+        run: ./gradlew --no-daemon --console=plain cleanTest check
+      - name: Failed tests
+        if: failure()
+        working-directory: app
+        run: |
+          shopt -s nullglob
+          reports=(*/build/test-results/test/*.xml)
+          [ ${#reports[@]} -gt 0 ] || { echo "no test reports: the build failed before any test ran"; exit 0; }
+          python3 -I - "${reports[@]}" <<'EOF'
+          import sys, xml.etree.ElementTree as ET
+          for path in sys.argv[1:]:
+              for case in ET.parse(path).iter('testcase'):
+                  for problem in list(case.findall('failure')) + list(case.findall('error')):
+                      print(f"{case.get('classname')} > {case.get('name')}\n  {(problem.get('message') or '').strip()[:600]}")
+          EOF

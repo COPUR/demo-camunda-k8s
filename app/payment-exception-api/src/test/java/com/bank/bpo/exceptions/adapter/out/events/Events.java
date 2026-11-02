@@ -25,9 +25,13 @@ final class Events {
     }
 
     static ExceptionCaseRaised raised(String paymentId) {
+        return raised(paymentId, INTERACTION);
+    }
+
+    static ExceptionCaseRaised raised(String paymentId, InteractionId interaction) {
         PaymentId payment = PaymentId.of(paymentId);
         return new ExceptionCaseRaised(EventId.forFact("ExceptionCaseRaised", paymentId), payment, Jurisdiction.of("TR"), Rail.FAST,
-            2251799813685300L, new Actor("svc-bpo-worker-payments"), INTERACTION, Instant.parse("2026-11-02T10:00:00.123Z"));
+            2251799813685300L, new Actor("svc-bpo-worker-payments"), interaction, Instant.parse("2026-11-02T10:00:00.123Z"));
     }
 
     static ExceptionDecisionSubmitted decided(Optional<QueueName> queue) {

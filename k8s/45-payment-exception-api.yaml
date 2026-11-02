@@ -34,6 +34,9 @@ metadata:
   labels: {app.kubernetes.io/name: payment-exception-api, app.kubernetes.io/part-of: bpo-demo}
 spec:
   replicas: 1
+  # Recreate, not a rolling update: a rollout would briefly run the old and the new pod side by side, which is the
+  # second replica the in-memory idempotency records and outbox cannot have (see the top of this file).
+  strategy: {type: Recreate}
   selector:
     matchLabels: {app.kubernetes.io/name: payment-exception-api}
   template:
@@ -42,8 +45,10 @@ spec:
     spec:
       serviceAccountName: payment-exception-api
       automountServiceAccountToken: false
-      # The application drains for up to 20 s (server.shutdown graceful); the kubelet waits a little longer.
-      terminationGracePeriodSeconds: 30
+      # Shutdown takes up to 36 s: requests drain for 20 s (server.shutdown graceful), the outbox delivers what is
+      # queued for 10 s and 1 s more once interrupted, and a Kafka producer, where one is configured, closes in 5 s.
+      # The kubelet waits longer than that before it kills the JVM.
+      terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001

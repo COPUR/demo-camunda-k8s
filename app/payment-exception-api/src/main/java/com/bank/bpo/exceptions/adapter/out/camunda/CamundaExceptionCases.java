@@ -119,17 +119,21 @@ public final class CamundaExceptionCases implements ExceptionCaseRepository, Cas
             return recent.find(paymentId).map(CamundaExceptionCases::justOpened);
         }
         ProcessInstance instance = instances.getFirst();
-        long key = instance.getProcessInstanceKey();
-        Map<String, String> variables = variables(List.of(key)).getOrDefault(key, Map.of());
         return Optional.of(switch (instance.getState()) {
-            case ACTIVE, SUSPENDED -> active(instance, variables);
-            case COMPLETED -> project(instance, variables, completed(variables), Optional.empty());
-            case TERMINATED -> project(instance, variables, CaseState.CANCELED, Optional.empty());
-            case UNKNOWN_ENUM_VALUE -> project(instance, variables, CaseState.RESOLVING, Optional.empty());
+            case ACTIVE, SUSPENDED -> active(instance);
+            case COMPLETED -> {
+                Map<String, String> variables = variablesOf(instance);
+                yield project(instance, variables, completed(variables), Optional.empty(), Optional.empty());
+            }
+            case TERMINATED -> project(instance, variablesOf(instance), CaseState.CANCELED, Optional.empty(), Optional.empty());
+            case UNKNOWN_ENUM_VALUE -> project(instance, variablesOf(instance), CaseState.RESOLVING, Optional.empty(), Optional.empty());
         });
     }
 
-    /** The work queue: open review tasks of the process, oldest first, with the cases they belong to. */
+    /**
+     * The work queue: open review tasks of the process, oldest first, with the cases they belong to. As for one case,
+     * the tasks are read first, then how the operations reviews of the supervisor's tasks ended, then the variables.
+     */
     @Override
     public CasePage findInReview(CaseQuery query) {
         Optional<String> after = query.pageToken().map(PageTokens::cursor);
@@ -151,6 +155,8 @@ public final class CamundaExceptionCases implements ExceptionCaseRepository, Cas
         if (keys.isEmpty()) {
             return new CasePage(List.of(), Optional.empty());
         }
+        Map<Long, ExceptionReason> handedOn = handedOn(tasks.items().stream()
+            .filter(task -> SUPERVISOR_REVIEW.equals(task.getElementId())).map(UserTask::getProcessInstanceKey).distinct().toList());
         Map<Long, ProcessInstance> instances = EngineCalls.call("read the cases", () -> client.newProcessInstanceSearchRequest()
             .filter(filter -> filter.processInstanceKey(key -> key.in(keys)))
             .page(page -> page.limit(keys.size()))
@@ -161,7 +167,8 @@ public final class CamundaExceptionCases implements ExceptionCaseRepository, Cas
         List<ExceptionCase> items = tasks.items().stream()
             .filter(task -> instances.containsKey(task.getProcessInstanceKey()))
             .map(task -> project(instances.get(task.getProcessInstanceKey()),
-                variables.getOrDefault(task.getProcessInstanceKey(), Map.of()), CaseState.IN_REVIEW, Optional.of(reviewTask(task))))
+                variables.getOrDefault(task.getProcessInstanceKey(), Map.of()), CaseState.IN_REVIEW, Optional.of(reviewTask(task)),
+                Optional.ofNullable(handedOn.get(task.getProcessInstanceKey()))))
             .toList();
         String endCursor = tasks.page() == null ? null : tasks.page().endCursor();
         Optional<String> next = tasks.items().size() == query.pageSize() && endCursor != null && !endCursor.isBlank()
@@ -171,7 +178,13 @@ public final class CamundaExceptionCases implements ExceptionCaseRepository, Cas
 
     // ---- projection of engine state onto the case
 
-    private ExceptionCase active(ProcessInstance instance, Map<String, String> variables) {
+    /**
+     * A running case, read in the order the engine wrote it, latest first: the open task, then (for a supervisor's
+     * task) how the operations review ended, then the variables. The search follows the engine's log, so a later read
+     * shows at least what an earlier one did, and whatever the process wrote before the step a read showed: read the
+     * other way round, the variables could miss an ESCALATE whose supervisor task the next read already showed.
+     */
+    private ExceptionCase active(ProcessInstance instance) {
         long key = instance.getProcessInstanceKey();
         List<UserTask> open = EngineCalls.call("read the review task", () -> client.newUserTaskSearchRequest()
             .filter(filter -> filter.processInstanceKey(key).state(UserTaskState.CREATED))
@@ -180,7 +193,10 @@ public final class CamundaExceptionCases implements ExceptionCaseRepository, Cas
             .send()
             .join(), Map.of()).items();
         if (!open.isEmpty()) {
-            return project(instance, variables, CaseState.IN_REVIEW, Optional.of(reviewTask(open.getFirst())));
+            ReviewTask review = reviewTask(open.getFirst());
+            Optional<ExceptionReason> handedOn = review.level() == ReviewLevel.SUPERVISOR
+                ? Optional.ofNullable(handedOn(List.of(key)).get(key)) : Optional.empty();
+            return project(instance, variablesOf(instance), CaseState.IN_REVIEW, Optional.of(review), handedOn);
         }
         boolean awaiting = !EngineCalls.call("read the case's position", () -> client.newElementInstanceSearchRequest()
             .filter(filter -> filter.processInstanceKey(key).elementId(AWAIT_SCHEME_STATUS).state(ElementInstanceState.ACTIVE))
@@ -188,7 +204,38 @@ public final class CamundaExceptionCases implements ExceptionCaseRepository, Cas
             .requestTimeout(timeout)
             .send()
             .join(), Map.of()).items().isEmpty();
-        return project(instance, variables, awaiting ? CaseState.AWAITING_SCHEME_STATUS : CaseState.RESOLVING, Optional.empty());
+        return project(instance, variablesOf(instance), awaiting ? CaseState.AWAITING_SCHEME_STATUS : CaseState.RESOLVING, Optional.empty(),
+            Optional.empty());
+    }
+
+    /**
+     * Why each of these instances' supervisors is looking at the case, from how its operations review ended: completed
+     * is an ESCALATE decision (Gateway_OpsDecision sends nothing else to the supervisor), canceled is
+     * BoundaryEvent_OpsSla interrupting it. Task_OpsReview runs once per instance. An instance whose operations review
+     * is not shown as ended (yet) is left out, and the decision variable is all there is to go on.
+     */
+    private Map<Long, ExceptionReason> handedOn(List<Long> keys) {
+        if (keys.isEmpty()) {
+            return Map.of();
+        }
+        List<UserTask> reviews = EngineCalls.call("read how operations handed the case on", () -> client.newUserTaskSearchRequest()
+            .filter(filter -> filter.processInstanceKey(key -> key.in(keys)).elementId(OPS_REVIEW))
+            .page(page -> page.limit(keys.size()))
+            .requestTimeout(timeout)
+            .send()
+            .join(), Map.of()).items();
+        Map<Long, ExceptionReason> handedOn = new HashMap<>();
+        for (UserTask review : reviews) {
+            if (!OPS_REVIEW.equals(review.getElementId()) || review.getState() == null) {
+                continue;
+            }
+            switch (review.getState()) {
+                case COMPLETED -> handedOn.put(review.getProcessInstanceKey(), ExceptionReason.OPERATIONS_ESCALATION);
+                case CANCELED -> handedOn.put(review.getProcessInstanceKey(), ExceptionReason.OPERATIONS_SLA_EXPIRED);
+                default -> { }
+            }
+        }
+        return handedOn;
     }
 
     /** A completed instance ended settled, rejected or handed back: pay's outcome says which, else the scheme's answer. */
@@ -211,17 +258,17 @@ public final class CamundaExceptionCases implements ExceptionCaseRepository, Cas
     /**
      * Why people are (or were) looking at the case, from what the process recorded: no scheme status means the
      * inquiry timed out; any other answer than ACSC or RJCT (PDNG, or a code this context does not model, which
-     * Gateway_SchemeStatus also sends to operations) that it stayed unclear; at supervisor level, an ESCALATE decision
-     * means operations escalated, none that their SLA expired; EXPIRED that the supervisor's did too.
+     * Gateway_SchemeStatus also sends to operations) that it stayed unclear; at supervisor level, how the operations
+     * review ended ({@code handedOn}) or, where that is not in sight, an ESCALATE decision, and else nothing rather
+     * than a guess; EXPIRED that the supervisor's SLA expired too.
      */
     static Optional<ExceptionReason> reason(CaseState state, Optional<ReviewTask> review, Optional<String> reportedStatus,
-                                            Optional<Decision> decision) {
+                                            Optional<Decision> decision, Optional<ExceptionReason> handedOn) {
         if (decision.isPresent() && decision.get() == Decision.EXPIRED) {
             return Optional.of(ExceptionReason.SUPERVISOR_SLA_EXPIRED);
         }
         if (review.isPresent() && review.get().level() == ReviewLevel.SUPERVISOR) {
-            return Optional.of(decision.isPresent() && decision.get() == Decision.ESCALATE
-                ? ExceptionReason.OPERATIONS_ESCALATION : ExceptionReason.OPERATIONS_SLA_EXPIRED);
+            return handedOn.or(() -> decision.filter(made -> made == Decision.ESCALATE).map(made -> ExceptionReason.OPERATIONS_ESCALATION));
         }
         if (decision.isPresent() && decision.get() == Decision.ESCALATE) {
             return Optional.of(ExceptionReason.OPERATIONS_ESCALATION);
@@ -236,7 +283,8 @@ public final class CamundaExceptionCases implements ExceptionCaseRepository, Cas
         return finalAnswer ? Optional.empty() : Optional.of(ExceptionReason.SCHEME_STATUS_UNCLEAR);
     }
 
-    private ExceptionCase project(ProcessInstance instance, Map<String, String> variables, CaseState state, Optional<ReviewTask> review) {
+    private ExceptionCase project(ProcessInstance instance, Map<String, String> variables, CaseState state, Optional<ReviewTask> review,
+                                  Optional<ExceptionReason> handedOn) {
         try {
             String paymentId = Optional.ofNullable(variables.get("paymentId")).orElse(instance.getBusinessId());
             Optional<SchemeStatus> schemeStatus = SchemeStatus.of(variables.get("schemeStatus"));
@@ -244,7 +292,7 @@ public final class CamundaExceptionCases implements ExceptionCaseRepository, Cas
             Optional<Outcome> outcome = state.terminal() ? Outcome.of(variables.get("exceptionOutcome")) : Optional.empty();
             Instant raisedAt = Optional.ofNullable(instance.getStartDate()).map(OffsetDateTime::toInstant).orElse(Instant.EPOCH);
             return new ExceptionCase(PaymentId.of(paymentId), Jurisdiction.of(variables.get("jurisdiction")), Rail.of(variables.get("rail")), state,
-                schemeStatus, reason(state, review, Optional.ofNullable(variables.get("schemeStatus")), decision), review, decision, outcome,
+                schemeStatus, reason(state, review, Optional.ofNullable(variables.get("schemeStatus")), decision, handedOn), review, decision, outcome,
                 Boolean.TRUE.equals(instance.getHasIncident()), raisedAt, instance.getProcessInstanceKey());
         } catch (DomainException | IllegalArgumentException | NullPointerException e) {
             throw new DomainException(ErrorCode.WORKFLOW_REJECTED,
@@ -266,6 +314,11 @@ public final class CamundaExceptionCases implements ExceptionCaseRepository, Cas
         return new ReviewTask(new ReviewTaskId(task.getUserTaskKey()), level, queue,
             Optional.ofNullable(task.getDueDate()).map(OffsetDateTime::toInstant),
             Optional.ofNullable(task.getAssignee()).filter(assignee -> !assignee.isBlank()));
+    }
+
+    private Map<String, String> variablesOf(ProcessInstance instance) {
+        long key = instance.getProcessInstanceKey();
+        return variables(List.of(key)).getOrDefault(key, Map.of());
     }
 
     /** The case's process variables (process scope only: a call activity's local copies are not the case's). */

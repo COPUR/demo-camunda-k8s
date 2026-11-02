@@ -23,7 +23,10 @@ data:
     set -euo pipefail
     kc() { /opt/keycloak/bin/kcadm.sh "$@" --config /tmp/kcadm.config; }
     realm=camunda-platform
-    until kc config credentials --server http://keycloak:18080/auth --realm master --user kc-admin --password "$KC_ADMIN_PASSWORD" >/dev/null 2>&1; do sleep 5; done
+    # Passwords and secrets never go on a command line, which anything that can list the container's processes reads:
+    # kcadm takes the admin password from KC_CLI_PASSWORD and the client secrets as JSON on stdin (printf is a builtin).
+    until KC_CLI_PASSWORD=$KC_ADMIN_PASSWORD kc config credentials --server http://keycloak:18080/auth --realm master --user kc-admin \
+        >/dev/null 2>&1; do sleep 5; done
     until kc get "realms/$realm" >/dev/null 2>&1; do echo "waiting for realm $realm"; sleep 5; done
 
     scope_id() {
@@ -43,14 +46,17 @@ data:
       echo "$id"
     }
 
+    # The secrets install.sh makes are hex; anything that could break out of a JSON string is refused.
     client() {
       local client_id=$1 secret=$2 id
+      [[ "$secret" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || { echo "the secret for $client_id is not plain token text" >&2; exit 1; }
       id=$(kc get clients -r "$realm" -q clientId="$client_id" --fields id --format csv --noquotes)
       if [ -z "$id" ]; then
-        id=$(kc create clients -r "$realm" -s clientId="$client_id" -s publicClient=false -s serviceAccountsEnabled=true \
-          -s standardFlowEnabled=false -s directAccessGrantsEnabled=false -s implicitFlowEnabled=false -s secret="$secret" -i)
+        id=$(printf '{"clientId":"%s","publicClient":false,"serviceAccountsEnabled":true,"standardFlowEnabled":false,%s"secret":"%s"}' \
+            "$client_id" '"directAccessGrantsEnabled":false,"implicitFlowEnabled":false,' "$secret" \
+          | kc create clients -r "$realm" -f - -i)
       else
-        kc update "clients/$id" -r "$realm" -s secret="$secret"
+        printf '{"secret":"%s"}' "$secret" | kc update "clients/$id" -r "$realm" -f - --merge
       fi
       echo "$id"
     }

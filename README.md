@@ -367,8 +367,8 @@ girmez; `OutputVariables` bunları çalışma anında reddeder.
 | k3s (Linux sandbox, `DEMO_CLUSTER=current`, `DEMO_IMAGE_LOAD` ile) | `./install.sh` baştan sona çalıştı; 14 pod çalışıyor, doğrulama 4 bloke tahsilini gördü |
 | Docker Desktop, kind modu (macOS) | Temiz klondan `./install.sh` baştan sona çalıştı (çıkış kodu 0); 12 pod çalışıyor, doğrulama 4 bloke tahsilini gördü |
 | Docker Desktop kubeadm modu, OrbStack, Rancher Desktop, minikube | Denenmedi |
-| İstisna API'si, gerçek Camunda 8.10.4 (Docker, `app/payment-exception-api/e2e/run.sh`) | 4 uçtan uca test geçti: vaka açma ve tekrarı, kuyruk ve sayfalama, eskalasyon, karar ve ödeme sonucu; API'nin motor kimliği yalnızca dört P2 yetkisiyle |
-| İstisna API'si, Keycloak 26.7.5 + Camunda 8.10.4 OIDC (Docker, demo ayarlarıyla) | `keycloak-clients` betiği iki kez çalıştı; gerçek token'larla kurulumun API kontrolü (`demo-api-check`) ve `./demo.sh api`'nin bütün komutları geçti |
+| İstisna API'si, gerçek Camunda 8.10.4 (Docker, `app/payment-exception-api/e2e/run.sh`) | 4 uçtan uca test art arda 10 koşuda geçti: vaka açma ve tekrarı, kuyruk ve sayfalama, eskalasyon, karar ve ödeme sonucu; API'nin motor kimliği yalnızca dört P2 yetkisiyle |
+| İstisna API'si, Keycloak 26.7.5 + Camunda 8.10.4 OIDC (Docker, demo ayarlarıyla) | `keycloak-clients` betiği iki kez çalıştı; gerçek token'larla kurulumun API kontrolü (`demo-api-check`) ve `./demo.sh api`'nin bütün komutları geçti. Şifreleri komut satırından çıkaran sürüm üç kez daha çalıştı; hiçbir sürecin komut satırında şifre ya da sır görülmedi |
 
 Yukarıdaki iki küme satırı API'den önceki sürüme aittir; bu sürümle `./install.sh` bir kümede baştan sona
 denenmedi. API'nin parçaları son iki satırdaki gibi kümesiz denendi. Süreler yaklaşıktır ve ağa, makineye göre

@@ -238,10 +238,10 @@ başlığında geldiği ve sertifikaya bağlı olmadığı.
 
 | Sütun | Bu modülde |
 |---|---|
-| Operasyonel mükemmellik | Ortamdan yapılandırma (12 faktör III), ayrı yönetim portu ve probe'lar, korelasyon kimliği log'da ve olayda, katalogdaki runbook alanları |
+| Operasyonel mükemmellik | Ortamdan yapılandırma (12 faktör III), ayrı yönetim portu ve probe'lar, korelasyon kimliği (`x-fapi-interaction-id`) isteğin log satırlarında, olayın kendisinde ve outbox'un o olay için yazdığı satırlarda, katalogdaki runbook alanları |
 | Güvenlik | Yukarıdaki tablo; en az yetki kapsamları, derinlemesine savunma (filtre → kimlik → kapsam → nesne kuralı) |
 | Güvenilirlik | Idempotency anahtarı, If-Match ile iyimser eşzamanlılık, motor çağrısında zaman aşımı, tekrar denenebilir hata için 503 + `Retry-After`, outbox'ta üstel geri çekilme ve jitter, hazırlık probe'u bağımlılığa bağlı değil (motor yavaşsa tüm kopyalar birden servis dışı kalmaz) |
-| Performans verimliliği | İkili protobuf seçeneği, imleçli sayfalama, sayfa başına üç arama çağrısı (görev, örnek, değişken), koşullu GET (`304`) |
+| Performans verimliliği | İkili protobuf seçeneği, imleçli sayfalama, sayfa başına üç arama çağrısı (görev, örnek, değişken; sayfada süpervizör görevi varsa operasyon görevleri için bir tane daha), koşullu GET (`304`) |
 | Maliyet optimizasyonu | Kendi veritabanı yok (motor kayıttır), broker isteğe bağlı, tek imaj |
 | Sürdürülebilirlik | Önbelleklenebilir katalog, gereksiz yoklama yok, sınırlı bellek yapıları |
 
@@ -250,6 +250,12 @@ başlığında geldiği ve sertifikaya bağlı olmadığı.
 - **Tek kayıt sistemi.** Vaka Camunda'dadır; API'nin veritabanı yoktur, ikili yazım (dual write) yoktur.
 - **Okuma gecikmesi.** Camunda arama API'si motoru kısa bir gecikmeyle izler. Bu kopyanın açtığı vakalar iki
   dakika boyunca hatırlanır (read-your-writes); başka bir kopyadan okuyan istemci bu sürede tekrar dener.
+- **Okuma sırası.** Bir vaka birkaç aramayla okunur ve her arama motoru başka bir anda yakalar. API bu yüzden
+  sonradan yazılanı önce okur: önce açık görev, süpervizör göreviyse operasyon görevinin nasıl bittiği, en son
+  değişkenler. Süpervizörün neden baktığı (EXC-003, EXC-004) operasyon görevinin bitişinden çıkar: tamamlandıysa
+  yükseltme, iptal edildiyse SLA. Bu bitiş görev kayıtlarındadır ve süpervizör görevinden önce yazılır. Önceki
+  sürüm değişkenleri önce okuyordu; ESCALATE kararı henüz görünmeden süpervizör görevi göründüğünde vakayı bir an
+  "operasyon SLA'sı doldu" diye gösteriyordu. Gerçek motor testi bunu yakaladı.
 - **Idempotency.** Anahtar (işlem, çağıran) kapsamındadır; aynı anahtar ve aynı istek ilk yanıtı döner
   (`Idempotent-Replayed: true`), farklı istek `422 PEX-3006` alır, süren istek `409 PEX-3007`.
 - **Eşzamanlılık.** Aynı ödeme için kopya içinde kilit; kopyalar arası çit, ödeme kimliğinin süreç örneğinin
@@ -270,25 +276,30 @@ cd app && ./gradlew :payment-exception-api:check     # testler + JaCoCo kuralı 
 app/payment-exception-api/e2e/run.sh                 # gerçek Camunda 8.10.4 ile uçtan uca testler (Docker gerekir)
 ```
 
-Son çalıştırma (2026-11-02): 276 test, hepsi geçti; satır kapsamı %97,8, dal kapsamı %92,3 (üretilen protobuf
-kodu ve `main` sınıfı hariç). İmaj derlemesi (`app/Dockerfile`) testlerle birlikte bu kuralı da çalıştırır.
-Uçtan uca testler `e2e` etiketlidir ve `check`'e girmez; `e2e/run.sh` ile 4/4 geçti.
+Son çalıştırma (2026-11-02): 284 test, hepsi geçti; satır kapsamı %97,8, dal kapsamı %92,5 (üretilen protobuf
+kodu ve `main` sınıfı hariç). İmaj derlemesi (`app/Dockerfile`) testlerle birlikte bu kuralı da çalıştırır, CI'daki
+`java` işi de her PR'da `cleanTest check` koşar. Uçtan uca testler `e2e` etiketlidir ve `check`'e girmez; Docker
+gerektirdikleri için elle çalışır. Okuma sırası düzeltmesinden sonra `e2e/run.sh` art arda 10 kez çalıştı, her
+seferinde 4/4 geçti.
 
 | Katman | Testler |
 |---|---|
 | Alan | Value object kuralları, `ExceptionCase` değişmezleri ve karar kuralları |
 | Uygulama | Use case'ler sahte portlarla; 8 iş parçacığıyla eşzamanlı açma |
 | REST | `@SpringBootTest` + MockMvc: JSON ve ikili protobuf, kapsamlar, If-Match, idempotency, problem+json, boyut, medya türleri, probe'lar |
-| Camunda | Gerçek `CamundaClient`, loopback'te betikli sahte motor: istek gövdeleri, durum eşleme, sayfalama, hata eşleme, zaman aşımı |
-| Olaylar | Avro gidiş-dönüş, single-object başlığı, şema uyumluluğu, `MockProducer`, outbox geri çekilmesi ve kapanış |
+| Camunda | Gerçek `CamundaClient`, loopback'te betikli sahte motor: istek gövdeleri, durum eşleme, sayfalama, hata eşleme, zaman aşımı, okuma sırası, süpervizör seviyesinde nedenin operasyon görevinin bitişinden çıkması |
+| Olaylar | Avro gidiş-dönüş, single-object başlığı, şema uyumluluğu, `MockProducer`, outbox geri çekilmesi ve kapanış, outbox satırlarında isteğin `interactionId`'si |
 | Uygunluk işlevleri | `ArchitectureTest` (hexagonal kurallar), `CatalogConsistencyTest` (kod ↔ katalog ↔ BPMN) |
-| Gerçek motor (`e2e`) | `RealEngineE2eTest`, `e2e/run.sh`'in Docker'da başlattığı Camunda 8.10.4'e karşı: yetkilendirme açık, businessId tekilliği açık, API'nin motor kimliği yalnızca dört P2 yetkisiyle. API'den açılan vaka ve tekrarı, ikinci açmaya `409 PEX-3002`, cevapsız şemada operasyon kuyruğu, `If-Match` ile karar ve eski etikete `412`, ödeme sonucu `SETTLED`; başka yerden açılmış örnekte belirsiz durum, eskalasyon, yanlış kuyruğa `403`, süpervizör kararı ve `REJECTED`; motorun ikinci örneği reddetmesi; kuyruğun sayfa sayfa okunması |
+| Gerçek motor (`e2e`) | `RealEngineE2eTest`, `e2e/run.sh`'in Docker'da başlattığı Camunda 8.10.4'e karşı: yetkilendirme açık, businessId tekilliği açık, API'nin motor kimliği yalnızca dört P2 yetkisiyle. API'den açılan vaka ve tekrarı, ikinci açmaya `409 PEX-3002`, cevapsız şemada operasyon kuyruğu, `If-Match` ile karar ve eski etikete `412`, ödeme sonucu `SETTLED`; başka yerden açılmış örnekte belirsiz durum, eskalasyon (süpervizör görevi göründüğü anda vakada ve kuyruk listesinde neden EXC-003), yanlış kuyruğa `403`, süpervizör kararı ve `REJECTED`; motorun ikinci örneği reddetmesi; kuyruğun sayfa sayfa okunması |
 
 Kümesiz entegrasyon denemesi (2026-11-02, Docker, demonun ayarlarıyla): Keycloak 26.7.5, OIDC ile Camunda 8.10.4
 (`helm/values-camunda.yaml`'daki yetki ve tekillik), API demonun manifestindeki ortam ve güvenlik bağlamıyla (root
 değil, salt okunur kök, capability yok). `keycloak-clients` betiği iki kez çalıştı; token'lar beklenen audience,
 kapsam ve grupları taşıdı; görevi CLIENT sahipli yetkiyle tamamlamak yetti; kurulum kontrolü (`api-check.sh`,
-sabit curl imajında) ve `./demo.sh api`'nin bütün komutları geçti.
+sabit curl imajında) ve `./demo.sh api`'nin bütün komutları geçti. Şifreleri komut satırından çıkaran sürüm üç kez
+çalıştı, biri sırrı değiştirilmiş bir istemciyle (yeni sır token aldı, eskisi `401`). Konteynerdeki bütün
+süreçlerin komut satırları örneklendi; hiçbirinde şifre ya da sır görülmedi, eski betik aynı ölçümde yedisini de
+gösterdi.
 
 ## Kubernetes'te
 
@@ -332,8 +343,11 @@ Ayrıntılar `config/ExceptionApiProperties` içindedir; geçersiz değerle serv
 - **Bellekte durum.** Idempotency kayıtları, okuma önbelleği, hız sınırı ve outbox kopya başınadır ve yeniden
   başlatmada kaybolur. Outbox kalıcı değildir: süreç ölürse kuyruktaki olaylar gider (kayıt motorda kalır).
   Kalıcı bir outbox (tablo ya da motorun exporter'ı) sonraki adımdır.
-- **Kararı veren kişi.** Görev API'nin servis hesabıyla tamamlanır; kararı kimin verdiği olayda (`actor`) ve
-  log'dadır. Görevi tamamlamadan önce kişiye atamak sonraki adımdır.
+- **Kararı veren kişi.** Görev API'nin servis hesabıyla tamamlanır, motor da görevi o hesabın tamamladığını
+  kaydeder. Kararı kimin verdiği yalnızca olaydadır (`actor`). Log satırları içerik taşımaz: olayın türü, kimliği,
+  ödeme ve isteğin `interactionId`'si oradadır, kişi yoktur. Broker'sız demoda olay yalnızca bu satırla anıldığı
+  için kişi kalıcı olarak hiçbir yerde tutulmaz. Görevi tamamlamadan önce kişiye atamak ve olayları bir broker'a
+  ya da kalıcı bir outbox'a yazmak sonraki adımlardır.
 - **Tek kopya.** Bellekteki durum yüzünden Deployment tek kopyadır. İkinci bir kopya, tekrar gelen isteği yeni
   sayar; motorun businessId tekilliği ve görev durumu yine de ikinci vakayı ya da kararı reddeder.
 - **Kuyruk üyeleri servis hesabı.** Demo tarayıcı akışı gerektirmesin diye `demo-ops-reviewer` ve

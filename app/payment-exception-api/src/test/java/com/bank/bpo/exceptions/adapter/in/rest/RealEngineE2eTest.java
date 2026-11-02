@@ -203,10 +203,15 @@ class RealEngineE2eTest {
                 .content("{\"decision\":\"DECISION_ESCALATE\"}"))
             .andExpect(status().isAccepted());
 
+        // The reason is checked the moment the supervisor's task shows, not waited for: a reason that is wrong for a
+        // moment (read skew between the task and the variable searches) must fail here.
         JsonNode supervisorReview = awaitCase(paymentId, c -> "REVIEW_LEVEL_SUPERVISOR".equals(c.path("openReview").path("level").asString()));
         assertThat(supervisorReview.path("reason").asString()).isEqualTo("EXCEPTION_REASON_OPERATIONS_ESCALATION");
         assertThat(supervisorReview.path("openReview").path("queue").asString()).isEqualTo("pay-tr-fast-supervisor");
-        assertThat(listQueue("pay-tr-fast-supervisor", "REVIEW_LEVEL_SUPERVISOR", 50)).contains(paymentId);
+        assertThat(queueEntries("pay-tr-fast-supervisor", "REVIEW_LEVEL_SUPERVISOR", 50))
+            .filteredOn(c -> paymentId.equals(c.path("paymentId").asString()))
+            .singleElement()
+            .satisfies(c -> assertThat(c.path("reason").asString()).isEqualTo("EXCEPTION_REASON_OPERATIONS_ESCALATION"));
         // An operations reviewer is not a member of the supervisor queue.
         problem(mvc.perform(post("/api/v1/payment-exceptions/" + paymentId + "/decisions").with(opsReviewer())
             .contentType(MediaType.APPLICATION_JSON).header("If-Match", supervisorReview.path("etag").asString())
@@ -306,17 +311,22 @@ class RealEngineE2eTest {
 
     /** Every payment id in a queue, read page by page with the API's own next-page token. */
     private List<String> listQueue(String queue, String level, int pageSize) throws Exception {
-        List<String> ids = new ArrayList<>();
+        return queueEntries(queue, level, pageSize).stream().map(c -> c.path("paymentId").asString()).toList();
+    }
+
+    /** Every case in a queue as the list shows it, read page by page with the API's own next-page token. */
+    private List<JsonNode> queueEntries(String queue, String level, int pageSize) throws Exception {
+        List<JsonNode> entries = new ArrayList<>();
         String token = "";
         for (int page = 0; page < 200; page++) {
             MvcResult result = mvc.perform(get("/api/v1/payment-exceptions").with(reader()).param("queue", queue).param("reviewLevel", level)
                 .param("pageSize", String.valueOf(pageSize)).param("pageToken", token)).andReturn();
             assertThat(result.getResponse().getStatus()).as(result.getResponse().getContentAsString()).isEqualTo(200);
             JsonNode body = JSON.readTree(result.getResponse().getContentAsString());
-            body.path("exceptionCases").forEach(c -> ids.add(c.path("paymentId").asString()));
+            body.path("exceptionCases").forEach(entries::add);
             token = body.path("nextPageToken").asString();
             if (token.isEmpty()) {
-                return ids;
+                return entries;
             }
         }
         throw new AssertionError("more than 200 pages in " + queue);
