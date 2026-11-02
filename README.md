@@ -23,10 +23,11 @@ Yerel ve geçici bir demodur; yalnızca **sentetik veri** kullanır. Hedef üret
 6. [Demo senaryosu](#demo-senaryosu)
 7. [Test durumu](#test-durumu)
 8. [Güvenlik modeli](#güvenlik-modeli)
-9. [Komutlar ve ayarlar](#komutlar-ve-ayarlar)
-10. [Sorun giderme](#sorun-giderme)
-11. [Depo yapısı](#depo-yapısı)
-12. [Hedef topolojiden farklar](#hedef-topolojiden-farklar)
+9. [Ödeme istisnası API'si](#ödeme-istisnası-apisi)
+10. [Komutlar ve ayarlar](#komutlar-ve-ayarlar)
+11. [Sorun giderme](#sorun-giderme)
+12. [Depo yapısı](#depo-yapısı)
+13. [Hedef topolojiden farklar](#hedef-topolojiden-farklar)
 
 ---
 
@@ -373,6 +374,16 @@ Süreler yaklaşıktır ve ağa, makineye göre değişir.
 
 ---
 
+## Ödeme istisnası API'si
+
+`app/payment-exception-api`, istisna vakaları için REST API'dir: vakayı açar, çalışma kuyruğunu listeler,
+inceleme kararını alır ve istisna durumu kataloğu ile hata kodu deposunu sunar. Gövdeler protobuf (ikili ve
+proto3 JSON), olaylar Avro; kayıt Camunda'dadır. Varsayılan `./demo.sh up` bu servisi kümeye kurmaz; imaj
+derlemesi modülü test eder ve satır ile dal kapsamını %87'nin altına düşürmez. Ayrıntılar:
+[app/payment-exception-api/README.md](app/payment-exception-api/README.md).
+
+---
+
 ## Komutlar ve ayarlar
 
 | Komut | Ne yapar |
@@ -433,6 +444,7 @@ app/                   Gradle çok modüllü uygulama ve çok aşamalı Dockerfi
   bpo-worker-kit/      idempotency anahtarları, çıktı korkuluğu, sağlayıcı HTTP, hata eşleme
   bpo-worker-payments/ P2 job worker'ları (handler → port → adapter)
   domain-simulator/    sağlayıcı sözleşmelerinin süreç içi taklidi
+  payment-exception-api/ istisna vakaları REST API'si (protobuf, Avro olayları, katalog)
   payments-demo/       tek imaj: worker'lar veya bir simüle sağlayıcı (rol başına Deployment)
 ```
 

@@ -1,0 +1,64 @@
+// The catalog sub-domain: exception cases of the P2 process and the exception repository of this API.
+//
+//   GET /api/v1/exception-catalog                    -> 200 ExceptionCatalog
+//   GET /api/v1/exception-catalog/cases/{code}       -> 200 ExceptionCaseDefinition
+//   GET /api/v1/exception-catalog/errors/{code}      -> 200 ErrorDefinition (the "type" of every problem response)
+syntax = "proto3";
+
+package bpo.exceptions.v1;
+
+option java_package = "com.bank.bpo.exceptions.contract.v1";
+option java_multiple_files = true;
+option java_outer_classname = "ExceptionCatalogProto";
+
+enum ErrorCategory {
+  ERROR_CATEGORY_UNSPECIFIED = 0;
+  ERROR_CATEGORY_VALIDATION = 1;
+  ERROR_CATEGORY_AUTHENTICATION = 2;
+  ERROR_CATEGORY_AUTHORIZATION = 3;
+  ERROR_CATEGORY_NOT_FOUND = 4;
+  ERROR_CATEGORY_CONFLICT = 5;
+  ERROR_CATEGORY_PRECONDITION = 6;
+  ERROR_CATEGORY_BUSINESS_RULE = 7;
+  ERROR_CATEGORY_LIMIT = 8;
+  ERROR_CATEGORY_DEPENDENCY = 9;
+  ERROR_CATEGORY_INTERNAL = 10;
+}
+
+// A situation that needs someone's attention, where the model detects it and how it is handled.
+message ExceptionCaseDefinition {
+  // EXC- and three digits.
+  string code = 1;
+  string name = 2;
+  string title = 3;
+  string sub_domain = 4;
+  string trigger = 5;
+  repeated string bpmn_elements = 6;
+  // OPERATIONS, SUPERVISOR, PAY or ENGINEERING.
+  string route_to = 7;
+  repeated string allowed_decisions = 8;
+  string sla_source = 9;
+  string owner = 10;
+  repeated string related_errors = 11;
+  string runbook = 12;
+}
+
+// An error the API answers with.
+message ErrorDefinition {
+  // PEX- and four digits; stable, never reused.
+  string code = 1;
+  string name = 2;
+  string title = 3;
+  ErrorCategory category = 4;
+  int32 http_status = 5;
+  bool retryable = 6;
+  string sub_domain = 7;
+  string description = 8;
+  string remediation = 9;
+}
+
+message ExceptionCatalog {
+  string version = 1;
+  repeated ExceptionCaseDefinition exception_cases = 2;
+  repeated ErrorDefinition errors = 3;
+}

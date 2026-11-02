@@ -1,6 +1,6 @@
 # The demo's one application image, built entirely inside Docker: no JDK or Gradle is needed on the host.
 # Build context = the repository root (install.sh: docker build -f app/Dockerfile .), so the tests can read
-# sample-data/. Stage 1 compiles and tests the modules with JDK 23; stage 2 is the runtime JRE only.
+# sample-data/ and models/. Stage 1 compiles and tests the modules with JDK 23; stage 2 is the runtime JRE only.
 FROM eclipse-temurin:23-jdk@sha256:83177670e43c17769a5402a60601545318e45e63adf634fb5022340e516cded4 AS build
 WORKDIR /src
 # Behind a TLS-inspecting proxy, install.sh copies DEMO_BUILD_CA to .build-ca.crt (empty otherwise); every
@@ -17,10 +17,13 @@ RUN set -e; if [ -s /tmp/build-ca.crt ]; then \
     fi
 COPY app/ app/
 COPY sample-data/ sample-data/
+# payment-exception-api's tests hold its exception catalog against these BPMN models.
+COPY models/ models/
 WORKDIR /src/app
 ARG SKIP_TESTS=false
+# With tests, payment-exception-api must also keep line and branch coverage at 87% or more (JaCoCo rule).
 RUN if [ "$SKIP_TESTS" = "true" ]; then ./gradlew --no-daemon -q :payments-demo:bootJar; \
-    else ./gradlew --no-daemon -q test :payments-demo:bootJar; fi
+    else ./gradlew --no-daemon -q test :payment-exception-api:jacocoTestCoverageVerification :payments-demo:bootJar; fi
 
 FROM eclipse-temurin:23-jre@sha256:4972459272d4050ab14700677ac7a7511194f1d9ed333b95e886c3c8c80dedae
 WORKDIR /app

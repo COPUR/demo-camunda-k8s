@@ -1,0 +1,87 @@
+// Value objects of the payment exception context, as they cross the API. One proto type per value object:
+// an enum for a closed set, a message for a composite, a constrained string for an identifier (the constraint is
+// written next to the field and enforced by the domain, not by the wire format).
+syntax = "proto3";
+
+package bpo.exceptions.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option java_package = "com.bank.bpo.exceptions.contract.v1";
+option java_multiple_files = true;
+option java_outer_classname = "ValueObjectsProto";
+
+// Shared kernel: the payment rail. This context serves TR FAST only.
+enum Rail {
+  RAIL_UNSPECIFIED = 0;
+  RAIL_FAST = 1;
+}
+
+// Scheme-status sub-domain (read here, owned by psg-tr): ISO 20022 transaction status codes.
+// UNSPECIFIED means unknown: no final answer yet, or the inquiry timed out.
+enum SchemeStatus {
+  SCHEME_STATUS_UNSPECIFIED = 0;
+  SCHEME_STATUS_ACSC = 1;
+  SCHEME_STATUS_RJCT = 2;
+  SCHEME_STATUS_PDNG = 3;
+}
+
+// Case-management sub-domain: where a case stands.
+enum CaseState {
+  CASE_STATE_UNSPECIFIED = 0;
+  CASE_STATE_AWAITING_SCHEME_STATUS = 1;
+  CASE_STATE_IN_REVIEW = 2;
+  CASE_STATE_RESOLVING = 3;
+  CASE_STATE_SETTLED = 4;
+  CASE_STATE_REJECTED = 5;
+  CASE_STATE_HANDED_BACK = 6;
+  CASE_STATE_CANCELED = 7;
+}
+
+// Who decides: operations first, then their supervisor.
+enum ReviewLevel {
+  REVIEW_LEVEL_UNSPECIFIED = 0;
+  REVIEW_LEVEL_OPERATIONS = 1;
+  REVIEW_LEVEL_SUPERVISOR = 2;
+}
+
+// What the scheme record shows, or an escalation. EXPIRED is set by the SLA timer only and is refused as input.
+enum Decision {
+  DECISION_UNSPECIFIED = 0;
+  DECISION_SETTLED = 1;
+  DECISION_REJECTED = 2;
+  DECISION_ESCALATE = 3;
+  DECISION_EXPIRED = 4;
+}
+
+// pay's outcome of record for a decision.
+enum Outcome {
+  OUTCOME_UNSPECIFIED = 0;
+  OUTCOME_SETTLE = 1;
+  OUTCOME_RELEASE = 2;
+  OUTCOME_HANDED_BACK = 3;
+}
+
+// Why a person is involved; each value is an entry of the exception case catalog (EXC-001 .. EXC-005).
+enum ExceptionReason {
+  EXCEPTION_REASON_UNSPECIFIED = 0;
+  EXCEPTION_REASON_SCHEME_STATUS_TIMEOUT = 1;
+  EXCEPTION_REASON_SCHEME_STATUS_UNCLEAR = 2;
+  EXCEPTION_REASON_OPERATIONS_ESCALATION = 3;
+  EXCEPTION_REASON_OPERATIONS_SLA_EXPIRED = 4;
+  EXCEPTION_REASON_SUPERVISOR_SLA_EXPIRED = 5;
+}
+
+// The open review of a case (ReviewTask value object). It holds no payment detail.
+message ReviewTask {
+  // The review task id (a Zeebe user task key). A new review (escalation, expired SLA) has a new id.
+  int64 task_id = 1;
+  ReviewLevel level = 2;
+  // The queue (candidate group) it is routed to, such as pay-tr-fast-ops; empty when routed to none.
+  string queue = 3;
+  // When the review's SLA ends.
+  google.protobuf.Timestamp due_at = 4;
+  // Who claimed it in Tasklist; empty when unclaimed.
+  string assignee = 5;
+  repeated Decision allowed_decisions = 6;
+}

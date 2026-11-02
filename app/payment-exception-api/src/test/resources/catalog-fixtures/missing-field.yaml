@@ -1,0 +1,11 @@
+version: 1.0.0
+exceptionCases: []
+errors:
+  - code: PEX-1001
+    name: INVALID_PAYMENT_ID
+    title: Payment id is not a synthetic demo-tr id
+    category: VALIDATION
+    retryable: false
+    subDomain: shared-kernel
+    description: d
+    remediation: r

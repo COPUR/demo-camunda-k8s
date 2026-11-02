@@ -1,0 +1,472 @@
+# Exception case catalog and exception repository of the instant payment exception process (P2,
+# pay-instant-exception) and of payment-exception-api. Served at GET /api/v1/exception-catalog; every problem
+# response's "type" points at its entry here (/api/v1/exception-catalog/errors/{code}).
+#
+# Rules, enforced by CatalogConsistencyTest:
+#   - every ErrorCode in the code is listed under errors, with the same name, title, category and retryable flag,
+#     and with the HTTP status the REST adapter really answers;
+#   - every ExceptionReason in the code is listed under exceptionCases;
+#   - codes are unique and never reused; a retired entry stays, marked in its description.
+# No entry holds payment data: the cases name element ids, queues and rules, never an amount or an account.
+version: 1.0.0
+
+exceptionCases:
+  - code: EXC-001
+    name: SCHEME_STATUS_TIMEOUT
+    title: Scheme status still unknown after the inquiry policy
+    subDomain: scheme-status
+    trigger: >-
+      lib-await-external-status ends with the error Err_StatusTimeout: the scheme still answered PDNG, or nothing,
+      after the four inquiries and the three waits that psg-status-inquiry-policy sets for the rail.
+    bpmnElements: [EndEvent_StatusTimeout, BoundaryEvent_StatusTimeout, Task_RouteException, Task_OpsReview]
+    routeTo: OPERATIONS
+    allowedDecisions: [SETTLED, REJECTED, ESCALATE]
+    slaSource: "pay-exception-routing: opsQueue and opsSla (TR/FAST: pay-tr-fast-ops, PT30M; otherwise pay-ops-l1, PT1H)"
+    owner: payments-operations
+    relatedErrors: [PEX-2003, PEX-3003, PEX-3004, PEX-3008, PEX-4001]
+    runbook: >-
+      Open the payment in the payments operations view and read the scheme record there (the task holds no payment
+      detail). Decide SETTLED or REJECTED as the scheme shows it; ESCALATE when the record is not conclusive.
+
+  - code: EXC-002
+    name: SCHEME_STATUS_UNCLEAR
+    title: Scheme answered a status that is neither ACSC nor RJCT
+    subDomain: scheme-status
+    trigger: >-
+      The inquiry came back with a final status other than ACSC or RJCT; Gateway_SchemeStatus takes its default
+      flow Flow_StatusUnclear into the operations review.
+    bpmnElements: [Gateway_SchemeStatus, Task_RouteException, Task_OpsReview]
+    routeTo: OPERATIONS
+    allowedDecisions: [SETTLED, REJECTED, ESCALATE]
+    slaSource: "pay-exception-routing: opsQueue and opsSla"
+    owner: payments-operations
+    relatedErrors: [PEX-2003, PEX-3004, PEX-3008, PEX-4001]
+    runbook: Same as EXC-001; note the status the scheme gave in the payments operations view.
+
+  - code: EXC-003
+    name: OPERATIONS_ESCALATION
+    title: Operations escalated the case to the supervisor
+    subDomain: case-management
+    trigger: The operations reviewer decided ESCALATE (Gateway_OpsDecision, flow Flow_OpsEscalated).
+    bpmnElements: [Task_OpsReview, Gateway_OpsDecision, Task_SupervisorReview]
+    routeTo: SUPERVISOR
+    allowedDecisions: [SETTLED, REJECTED]
+    slaSource: "pay-exception-routing: supervisorQueue and supervisorSla (TR/FAST: pay-tr-fast-supervisor, PT2H; otherwise pay-ops-l2, PT4H)"
+    owner: payments-operations-supervisors
+    relatedErrors: [PEX-2003, PEX-3004, PEX-4001]
+    runbook: >-
+      Record the scheme record only when the scheme has confirmed it; pay checks the decision against the
+      gateway's record. A supervisor cannot escalate further.
+
+  - code: EXC-004
+    name: OPERATIONS_SLA_EXPIRED
+    title: Nobody in operations decided within the operations SLA
+    subDomain: case-management
+    trigger: The interrupting timer BoundaryEvent_OpsSla fires after opsSla; the operations task is cancelled.
+    bpmnElements: [BoundaryEvent_OpsSla, Task_SupervisorReview]
+    routeTo: SUPERVISOR
+    allowedDecisions: [SETTLED, REJECTED]
+    slaSource: "pay-exception-routing: supervisorQueue and supervisorSla"
+    owner: payments-operations-supervisors
+    relatedErrors: [PEX-3004]
+    runbook: >-
+      A decision sent for the cancelled operations task is answered with PEX-3004: read the case again and decide
+      on the supervisor task.
+
+  - code: EXC-005
+    name: SUPERVISOR_SLA_EXPIRED
+    title: Nobody decided within the supervisor SLA either
+    subDomain: case-management
+    trigger: >-
+      The interrupting timer BoundaryEvent_SupervisorSla fires; Event_DecisionExpired sets exceptionDecision to
+      EXPIRED and the process records it with pay.
+    bpmnElements: [BoundaryEvent_SupervisorSla, Event_DecisionExpired, Task_RecordExceptionDecision]
+    routeTo: PAY
+    allowedDecisions: []
+    slaSource: ""
+    owner: pay
+    relatedErrors: [PEX-3003, PEX-4001]
+    runbook: >-
+      No money moves on an expiry: pay takes the payment back (HANDED_BACK) and the hold stays. Follow up in pay;
+      the case is closed here.
+
+  - code: EXC-006
+    name: HANDED_BACK_TO_PAY
+    title: pay took the payment back
+    subDomain: payments
+    trigger: >-
+      pay.record-exception-decision answered HANDED_BACK (an expired review, or pay did not accept the decision
+      against the gateway's record); Gateway_ExceptionOutcome takes its default flow to EndEvent_HandedBack.
+    bpmnElements: [Task_RecordExceptionDecision, Gateway_ExceptionOutcome, EndEvent_HandedBack]
+    routeTo: PAY
+    allowedDecisions: []
+    slaSource: ""
+    owner: pay
+    relatedErrors: [PEX-3003]
+    runbook: The case ends in HANDED_BACK. The hold is neither captured nor released; pay owns the payment again.
+
+  - code: EXC-007
+    name: PROVIDER_BUSINESS_REJECTION
+    title: A provider refused a step for a business reason
+    subDomain: workflow
+    trigger: >-
+      A provider (psg-tr, acc, pay, ntf) answered 422; the worker throws the BPMN error Err_<Code> (JobErrors).
+      pay-instant-exception catches no such error, so the engine raises an incident on the task.
+    bpmnElements: [Task_CaptureHold, Task_MarkSettled, Task_ReleaseHold, Task_MarkRejected, Task_RecordExceptionDecision, Task_NotifySettled, Task_NotifyRejected]
+    routeTo: ENGINEERING
+    allowedDecisions: []
+    slaSource: ""
+    owner: platform-engineering
+    relatedErrors: []
+    runbook: >-
+      Open the incident in Operate; its message names the provider's code, never a payload. Fix the cause with the
+      provider's owner, then resolve the incident so the job runs again with the same idempotency key.
+
+  - code: EXC-008
+    name: PROVIDER_TRANSIENT_FAILURE
+    title: A provider or the token endpoint failed transiently
+    subDomain: workflow
+    trigger: >-
+      5xx, 429, a 409 other than IDEMPOTENCY_KEY_REUSED, a timeout or a lost connection (ProviderException
+      TRANSIENT): the job fails and is retried with the same idempotency key, up to the task's 5 retries; then the
+      engine raises an incident.
+    bpmnElements: [Task_InquireFirst, Task_InquireSecond, Task_InquireThird, Task_InquireLast, Task_CaptureHold, Task_MarkSettled, Task_ReleaseHold, Task_MarkRejected, Task_RecordExceptionDecision, Task_NotifySettled, Task_NotifyRejected]
+    routeTo: ENGINEERING
+    allowedDecisions: []
+    slaSource: ""
+    owner: platform-engineering
+    relatedErrors: []
+    runbook: >-
+      Check the provider's health and the worker's log for the interaction id. Once the provider is back, add
+      retries to the job (Operate) or resolve the incident; the idempotency key makes the repeat safe.
+
+  - code: EXC-009
+    name: PROVIDER_CONTRACT_FAULT
+    title: A call broke the provider contract
+    subDomain: workflow
+    trigger: >-
+      Any other 4xx (400, 401, 403, 404), an unreadable answer, an invalid id or value, a token endpoint 4xx, or an
+      ESCALATE or missing decision reaching pay.record-exception-decision (ProviderException CONTRACT): the job
+      fails with no retries left and the engine raises an incident at once.
+    bpmnElements: [Task_RecordExceptionDecision, Task_CaptureHold, Task_MarkSettled, Task_ReleaseHold, Task_MarkRejected]
+    routeTo: ENGINEERING
+    allowedDecisions: []
+    slaSource: ""
+    owner: platform-engineering
+    relatedErrors: []
+    runbook: Retrying cannot help. Fix the wiring (client, scope, audience, contract version), deploy, resolve the incident.
+
+  - code: EXC-010
+    name: PROVIDER_IDEMPOTENCY_KEY_REUSED
+    title: A provider saw one idempotency key with two different requests
+    subDomain: workflow
+    trigger: >-
+      A provider answered 409 IDEMPOTENCY_KEY_REUSED (ProviderException KEY_REUSED): a bug in the worker, never
+      retried with a new key; incident at once.
+    bpmnElements: [Task_CaptureHold, Task_MarkSettled, Task_ReleaseHold, Task_MarkRejected, Task_RecordExceptionDecision]
+    routeTo: ENGINEERING
+    allowedDecisions: []
+    slaSource: ""
+    owner: platform-engineering
+    relatedErrors: []
+    runbook: Compare the two requests behind the key in the provider's log; fix the worker before resolving the incident.
+
+errors:
+  # 1xxx validation
+  - code: PEX-1001
+    name: INVALID_PAYMENT_ID
+    title: Payment id is not a synthetic demo-tr id
+    category: VALIDATION
+    httpStatus: 400
+    retryable: false
+    subDomain: shared-kernel
+    description: The demo accepts only synthetic ids, demo-tr- followed by 1 to 40 of a-z, 0-9 and -.
+    remediation: Send a synthetic id such as demo-tr-unres-001. Never send a real payment reference or an IBAN.
+  - code: PEX-1002
+    name: INVALID_JURISDICTION
+    title: Jurisdiction is not an ISO 3166-1 alpha-2 code
+    category: VALIDATION
+    httpStatus: 400
+    retryable: false
+    subDomain: shared-kernel
+    description: The jurisdiction is two upper-case letters.
+    remediation: Send TR.
+  - code: PEX-1003
+    name: UNSUPPORTED_RAIL
+    title: Payment rail is not supported
+    category: VALIDATION
+    httpStatus: 400
+    retryable: false
+    subDomain: shared-kernel
+    description: This context handles TR FAST instant payments only.
+    remediation: Send RAIL_FAST.
+  - code: PEX-1004
+    name: INVALID_DECISION
+    title: Decision is missing or unknown
+    category: VALIDATION
+    httpStatus: 400
+    retryable: false
+    subDomain: case-management
+    description: The decision is unset or not a value of the Decision enum.
+    remediation: Send DECISION_SETTLED, DECISION_REJECTED or DECISION_ESCALATE.
+  - code: PEX-1005
+    name: INVALID_IDEMPOTENCY_KEY
+    title: Idempotency-Key is malformed
+    category: VALIDATION
+    httpStatus: 400
+    retryable: false
+    subDomain: api-platform
+    description: "The key is 8 to 64 characters of A-Z, a-z, 0-9 and the four marks _ . : - (a UUID fits)."
+    remediation: Use a fresh UUID per command and reuse it only to retry that command.
+  - code: PEX-1006
+    name: IDEMPOTENCY_KEY_REQUIRED
+    title: Idempotency-Key header is required
+    category: VALIDATION
+    httpStatus: 400
+    retryable: false
+    subDomain: api-platform
+    description: Every POST must carry an Idempotency-Key, so a retry after a lost response is safe.
+    remediation: Add the header; keep the value for retries of the same command.
+  - code: PEX-1007
+    name: INVALID_PAGE_REQUEST
+    title: Page size or page token is invalid
+    category: VALIDATION
+    httpStatus: 400
+    retryable: false
+    subDomain: case-management
+    description: page_size is 1 to 100; page_token must be a next_page_token this API returned.
+    remediation: Start again without page_token.
+  - code: PEX-1008
+    name: MALFORMED_REQUEST
+    title: Request body cannot be read
+    category: VALIDATION
+    httpStatus: 400
+    retryable: false
+    subDomain: api-platform
+    description: The body is not valid protobuf or proto3 JSON for the message, or has fields the message does not define.
+    remediation: Check the body against the published .proto files; unknown fields are refused, not ignored.
+  - code: PEX-1009
+    name: INVALID_QUEUE
+    title: Queue name is invalid
+    category: VALIDATION
+    httpStatus: 400
+    retryable: false
+    subDomain: case-management
+    description: A queue is 2 to 63 of a-z, 0-9 and -, as the routing decision names them.
+    remediation: Use a queue from pay-exception-routing, such as pay-tr-fast-ops.
+  # 2xxx authentication and authorization
+  - code: PEX-2001
+    name: UNAUTHENTICATED
+    title: A valid bearer token is required
+    category: AUTHENTICATION
+    httpStatus: 401
+    retryable: false
+    subDomain: identity-access
+    description: The token is missing, expired, not signed by the realm, issued by another issuer, or for another audience.
+    remediation: Get a token from the bpo-demo realm with the payment-exception-api audience.
+  - code: PEX-2002
+    name: FORBIDDEN
+    title: The token does not grant this operation
+    category: AUTHORIZATION
+    httpStatus: 403
+    retryable: false
+    subDomain: identity-access
+    description: "The token lacks the scope: exceptions:read, exceptions:raise or exceptions:decide."
+    remediation: Ask for the client or user to be granted the scope; do not retry.
+  - code: PEX-2003
+    name: NOT_A_QUEUE_MEMBER
+    title: Reviewer is not a member of the routed queue
+    category: AUTHORIZATION
+    httpStatus: 403
+    retryable: false
+    subDomain: case-management
+    description: The review task is routed to a queue (candidate group) the reviewer's token does not list in groups.
+    remediation: Let a member of the queue decide, or have the reviewer added to the Keycloak group.
+  # 3xxx state, concurrency, idempotency
+  - code: PEX-3001
+    name: EXCEPTION_CASE_NOT_FOUND
+    title: Exception case not found
+    category: NOT_FOUND
+    httpStatus: 404
+    retryable: false
+    subDomain: case-management
+    description: No process instance of pay-instant-exception exists for the payment id.
+    remediation: Check the id. A case raised a moment ago is visible at once on the replica that raised it.
+  - code: PEX-3002
+    name: EXCEPTION_CASE_ALREADY_EXISTS
+    title: Payment already has an exception case
+    category: CONFLICT
+    httpStatus: 409
+    retryable: false
+    subDomain: case-management
+    description: A payment has at most one exception case; the payment id is the case's identity.
+    remediation: Read the existing case at the Location of the first raise.
+  - code: PEX-3003
+    name: NO_OPEN_REVIEW
+    title: Exception case is not waiting for a decision
+    category: CONFLICT
+    httpStatus: 409
+    retryable: false
+    subDomain: case-management
+    description: The case is awaiting the scheme status, resolving, or closed; no review task is open.
+    remediation: Read the case; decide only while its state is IN_REVIEW.
+  - code: PEX-3004
+    name: REVIEW_TASK_CHANGED
+    title: Review task changed since it was read
+    category: PRECONDITION
+    httpStatus: 412
+    retryable: false
+    subDomain: case-management
+    description: >-
+      If-Match does not name the open review task: the case was escalated, its SLA expired, or someone else
+      completed the task.
+    remediation: GET the case again, check the new review, and send the new ETag.
+  - code: PEX-3005
+    name: PRECONDITION_REQUIRED
+    title: If-Match header is required
+    category: PRECONDITION
+    httpStatus: 428
+    retryable: false
+    subDomain: case-management
+    description: A decision must name the ETag of the case it was taken on.
+    remediation: Send If-Match with the ETag from GET /api/v1/payment-exceptions/{paymentId}.
+  - code: PEX-3006
+    name: IDEMPOTENCY_KEY_REUSED
+    title: Idempotency-Key was used for a different request
+    category: CONFLICT
+    httpStatus: 422
+    retryable: false
+    subDomain: api-platform
+    description: The key was first used with another body or target; the API never runs a different command under it.
+    remediation: Use a new key for a new command.
+  - code: PEX-3007
+    name: IDEMPOTENT_REQUEST_IN_PROGRESS
+    title: A request with this Idempotency-Key is still running
+    category: CONFLICT
+    httpStatus: 409
+    retryable: true
+    subDomain: api-platform
+    description: The first request with the key has not finished.
+    remediation: Retry after Retry-After with the same key and body; the answer will be the first request's.
+  - code: PEX-3008
+    name: REVIEW_TASK_CLAIMED_BY_OTHER
+    title: Review task is claimed by another reviewer
+    category: CONFLICT
+    httpStatus: 409
+    retryable: false
+    subDomain: case-management
+    description: Someone claimed the task in Tasklist; only the assignee decides it.
+    remediation: Ask the assignee, or unassign the task in Tasklist first.
+  - code: PEX-3009
+    name: CATALOG_ENTRY_NOT_FOUND
+    title: Catalog entry not found
+    category: NOT_FOUND
+    httpStatus: 404
+    retryable: false
+    subDomain: catalog
+    description: No exception case or error has this code.
+    remediation: List the catalog at /api/v1/exception-catalog.
+  # 4xxx business rules
+  - code: PEX-4001
+    name: DECISION_NOT_ALLOWED
+    title: Decision is not allowed at this review level
+    category: BUSINESS_RULE
+    httpStatus: 422
+    retryable: false
+    subDomain: case-management
+    description: >-
+      Operations may decide SETTLED, REJECTED or ESCALATE; a supervisor SETTLED or REJECTED. EXPIRED is set by
+      the SLA timer only.
+    remediation: Pick a decision of the open review's allowed_decisions.
+  - code: PEX-4002
+    name: JURISDICTION_NOT_SERVED
+    title: This deployment does not serve the jurisdiction
+    category: BUSINESS_RULE
+    httpStatus: 422
+    retryable: false
+    subDomain: case-management
+    description: Cases are opened only in the deployment of the payment's jurisdiction (data residency).
+    remediation: Send the case to the deployment that serves the jurisdiction.
+  # 5xxx protocol and limits
+  - code: PEX-5001
+    name: PAYLOAD_TOO_LARGE
+    title: Request body is too large
+    category: LIMIT
+    httpStatus: 413
+    retryable: false
+    subDomain: api-platform
+    description: Bodies are limited (16 KiB by default); every message of this API is far smaller.
+    remediation: Send only the fields of the message.
+  - code: PEX-5002
+    name: UNSUPPORTED_MEDIA_TYPE
+    title: Content-Type is not supported
+    category: VALIDATION
+    httpStatus: 415
+    retryable: false
+    subDomain: api-platform
+    description: Bodies are application/json (proto3 JSON) or application/x-protobuf.
+    remediation: Set Content-Type to one of the two.
+  - code: PEX-5003
+    name: NOT_ACCEPTABLE
+    title: No representation matches the Accept header
+    category: VALIDATION
+    httpStatus: 406
+    retryable: false
+    subDomain: api-platform
+    description: Resources are served as application/json or application/x-protobuf; errors as application/problem+json.
+    remediation: Accept one of them.
+  - code: PEX-5004
+    name: RATE_LIMITED
+    title: Too many requests
+    category: LIMIT
+    httpStatus: 429
+    retryable: true
+    subDomain: api-platform
+    description: The caller's token bucket is empty, or too many commands are in flight.
+    remediation: Wait Retry-After seconds, then retry with backoff and jitter and the same Idempotency-Key.
+  - code: PEX-5005
+    name: METHOD_NOT_ALLOWED
+    title: Method is not allowed on this resource
+    category: VALIDATION
+    httpStatus: 405
+    retryable: false
+    subDomain: api-platform
+    description: The resource does not support the method; the Allow header lists the ones it does.
+    remediation: Use a method from Allow.
+  - code: PEX-5006
+    name: RESOURCE_NOT_FOUND
+    title: No such resource
+    category: NOT_FOUND
+    httpStatus: 404
+    retryable: false
+    subDomain: api-platform
+    description: The path is not part of the API.
+    remediation: Check the path against the API description.
+  # 9xxx dependencies and bugs
+  - code: PEX-9001
+    name: WORKFLOW_UNAVAILABLE
+    title: Workflow engine is unavailable
+    category: DEPENDENCY
+    httpStatus: 503
+    retryable: true
+    subDomain: workflow
+    description: The orchestration cluster did not answer in time, answered 5xx or 429, or could not be reached.
+    remediation: Retry after Retry-After with backoff, jitter and the same Idempotency-Key.
+  - code: PEX-9002
+    name: WORKFLOW_REJECTED
+    title: Workflow engine refused the command
+    category: DEPENDENCY
+    httpStatus: 502
+    retryable: false
+    subDomain: workflow
+    description: The engine answered 4xx to a command the API built (missing process, permission, contract change).
+    remediation: An operator checks the API's client permissions and the deployed process; the caller does not retry.
+  - code: PEX-9999
+    name: INTERNAL_ERROR
+    title: Internal error
+    category: INTERNAL
+    httpStatus: 500
+    retryable: false
+    subDomain: api-platform
+    description: A bug. The response carries the interaction id; the log has the details.
+    remediation: Report the interaction id.
