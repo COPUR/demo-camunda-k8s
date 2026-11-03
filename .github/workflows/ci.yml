@@ -1,7 +1,8 @@
 name: ci
-# Lint, and the build and tests of app/; nothing here reaches a cluster. Never set the CI_RUNNER variable if this
-# repository is made public: fork pull requests, whose build scripts the java job runs, would then run on that
-# self-hosted machine. No job keeps the checkout's token (persist-credentials: false).
+# Lint, and the build and tests of app/; nothing here reaches a cluster. Pull requests run on GitHub-hosted runners;
+# only pushes to main use the machine vars.CI_RUNNER names (the self-hosted runner), when it is set. A pull request
+# can still edit this file, so before this repository is made public, remove that runner or make every outside
+# collaborator's workflow run wait for approval (Settings > Actions). No job keeps the checkout's token.
 on:
   pull_request:
   push:
@@ -10,7 +11,7 @@ permissions:
   contents: read
 jobs:
   lint:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name == 'push' && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
@@ -54,7 +55,7 @@ jobs:
     # Every Gradle project in app/ with the JDK the image builds with (Temurin 23.0.2+7, app/Dockerfile): unit, web,
     # contract and architecture tests and the payment exception API's 87 % coverage rule. The real-engine tests
     # (app/payment-exception-api/e2e/run.sh) need Docker and a Camunda image, so they stay a manual step.
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name == 'push' && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
