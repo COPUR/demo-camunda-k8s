@@ -1,0 +1,64 @@
+# payment-exception-api. Every value that differs between environments comes from the environment (twelve-factor
+# III); the issuer and its keys have no default, so a pod without them does not start.
+spring:
+  application:
+    name: payment-exception-api
+  main:
+    banner-mode: off
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+server:
+  port: ${PORT:8080}
+  shutdown: graceful
+  max-http-request-header-size: 8KB
+  error:
+    include-stacktrace: never
+    include-message: never
+    whitelabel:
+      enabled: false
+  tomcat:
+    connection-timeout: 5s
+    max-swallow-size: 32KB
+    threads:
+      max: 64
+management:
+  server:
+    port: ${MANAGEMENT_PORT:8081}
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+  # Readiness is this process only: a slow engine answers 503 PEX-9001 with Retry-After instead of taking every
+  # replica out of the load balancer at once.
+  health:
+    readinessstate:
+      enabled: true
+camunda:
+  client:
+    # The engine address and its credentials come from the environment (CAMUNDA_CLIENT_REST_ADDRESS,
+    # CAMUNDA_CLIENT_AUTH_*). The API only starts instances and completes user tasks: no job workers, no deployment.
+    mode: self-managed
+    prefer-rest-over-grpc: true
+    worker:
+      defaults:
+        enabled: false
+    deployment:
+      enabled: false
+bpo:
+  exceptions:
+    served-jurisdictions: TR
+    # issuer and jwk-set-uri: BPO_EXCEPTIONS_SECURITY_ISSUER, BPO_EXCEPTIONS_SECURITY_JWK_SET_URI.
+    security:
+      audience: payment-exception-api
+      principal-claim: preferred_username
+      groups-claim: groups
+    events:
+      topic: bpo.payment-exception.events.v1
+logging:
+  pattern:
+    correlation: "[${spring.application.name:},%X{interactionId:-}] "

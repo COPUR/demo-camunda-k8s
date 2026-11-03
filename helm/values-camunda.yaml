@@ -84,6 +84,24 @@ orchestration:
       memory: 2Gi
     limits:
       memory: 2Gi
+  env:
+    # payment-exception-api opens one case per payment with businessId = paymentId. The engine refuses a second
+    # active instance with the same business id only when this is on (off by default in 8.10); it is the fence
+    # behind the API's own check, so two raises that race on two replicas cannot open two cases.
+    - name: CAMUNDA_PROCESSINSTANCECREATION_BUSINESSIDUNIQUENESSENABLED
+      value: "true"
+    # Identity as code for payment-exception-api's own client: only what the API does on P2 (start it, read its
+    # instances and review tasks, complete a review task), unlike the worker and loader's admin role below. Set as
+    # environment, the form app/payment-exception-api/e2e/run.sh verifies against 8.10.4 (the chart's
+    # initialization.authorizations value is deprecated).
+    - {name: CAMUNDA_SECURITY_INITIALIZATION_AUTHORIZATIONS_0_OWNERTYPE, value: CLIENT}
+    - {name: CAMUNDA_SECURITY_INITIALIZATION_AUTHORIZATIONS_0_OWNERID, value: svc-payment-exception-api}
+    - {name: CAMUNDA_SECURITY_INITIALIZATION_AUTHORIZATIONS_0_RESOURCETYPE, value: PROCESS_DEFINITION}
+    - {name: CAMUNDA_SECURITY_INITIALIZATION_AUTHORIZATIONS_0_RESOURCEID, value: pay-instant-exception}
+    - {name: CAMUNDA_SECURITY_INITIALIZATION_AUTHORIZATIONS_0_PERMISSIONS_0, value: CREATE_PROCESS_INSTANCE}
+    - {name: CAMUNDA_SECURITY_INITIALIZATION_AUTHORIZATIONS_0_PERMISSIONS_1, value: READ_PROCESS_INSTANCE}
+    - {name: CAMUNDA_SECURITY_INITIALIZATION_AUTHORIZATIONS_0_PERMISSIONS_2, value: READ_USER_TASK}
+    - {name: CAMUNDA_SECURITY_INITIALIZATION_AUTHORIZATIONS_0_PERMISSIONS_3, value: COMPLETE_USER_TASK}
   security:
     authentication:
       method: oidc

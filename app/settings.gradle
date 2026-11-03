@@ -14,5 +14,7 @@ include 'bpo-worker-kit'
 include 'bpo-worker-payments'
 // In-process stand-in for the provider operations the workers call.
 include 'domain-simulator'
+// Payment exception API: REST (protobuf, proto3 JSON) over the exception cases, Avro domain events.
+include 'payment-exception-api'
 // The one image the demo runs: the workers, or one simulated provider, chosen per Deployment.
 include 'payments-demo'

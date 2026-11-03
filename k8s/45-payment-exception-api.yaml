@@ -1,0 +1,112 @@
+# payment-exception-api (app/payment-exception-api): REST over the exception cases of P2, from the same locally built
+# image as the services in 40-services.yaml, running its own jar. HTTPS on 8443 with the demo CA's certificate;
+# health and info on 8081 for the kubelet only. It checks every caller's Keycloak token (audience
+# payment-exception-api, scopes exceptions:read|raise|decide, groups for the review queues) and calls Camunda as
+# svc-payment-exception-api, which holds only the four P2 permissions set in helm/values-camunda.yaml.
+#
+# One replica on purpose: idempotency records and the event outbox are in memory, so a second replica would answer
+# a retried request as new (the engine's business id and task state still refuse a duplicate case or decision).
+# No Kafka in this demo, so the domain events go to the log.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: payment-exception-api
+  namespace: bpo-demo-ms
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-exception-api
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: payment-exception-api, app.kubernetes.io/part-of: bpo-demo}
+spec:
+  selector: {app.kubernetes.io/name: payment-exception-api}
+  ports:
+    - {name: https, port: 8443, targetPort: 8443}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-exception-api
+  namespace: bpo-demo-ms
+  labels: {app.kubernetes.io/name: payment-exception-api, app.kubernetes.io/part-of: bpo-demo}
+spec:
+  replicas: 1
+  # Recreate, not a rolling update: a rollout would briefly run the old and the new pod side by side, which is the
+  # second replica the in-memory idempotency records and outbox cannot have (see the top of this file).
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: payment-exception-api}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: payment-exception-api, app.kubernetes.io/part-of: bpo-demo}
+    spec:
+      serviceAccountName: payment-exception-api
+      automountServiceAccountToken: false
+      # Shutdown takes up to 36 s: requests drain for 20 s (server.shutdown graceful), the outbox delivers what is
+      # queued for 10 s and 1 s more once interrupted, and a Kafka producer, where one is configured, closes in 5 s.
+      # The kubelet waits longer than that before it kills the JVM.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: payment-exception-api
+          image: bpo-payments-demo:local
+          imagePullPolicy: Never
+          command: ["java", "-XX:MaxRAMPercentage=75", "-Djava.io.tmpdir=/tmp", "-jar", "/app/payment-exception-api.jar"]
+          env:
+            - {name: BPO_DEMO_ACK, value: synthetic-data-only}
+            - {name: JAVA_TOOL_OPTIONS, value: "-Djavax.net.ssl.trustStore=/tls-ca/truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12"}
+            - {name: PORT, value: "8443"}
+            - {name: MANAGEMENT_PORT, value: "8081"}
+            - {name: SERVER_SSL_BUNDLE, value: api}
+            - {name: SPRING_SSL_BUNDLE_PEM_API_KEYSTORE_CERTIFICATE, value: "file:/tls/tls.crt"}
+            - {name: SPRING_SSL_BUNDLE_PEM_API_KEYSTORE_PRIVATEKEY, value: "file:/tls/tls.key"}
+            # Tokens carry Keycloak's public issuer (KC_HOSTNAME), whichever address they were fetched from.
+            - {name: BPO_EXCEPTIONS_SECURITY_ISSUER, value: "http://localhost:18080/auth/realms/camunda-platform"}
+            - {name: BPO_EXCEPTIONS_SECURITY_JWKSETURI, value: "https://keycloak:8443/auth/realms/camunda-platform/protocol/openid-connect/certs"}
+            - {name: CAMUNDA_CLIENT_MODE, value: self-managed}
+            - {name: CAMUNDA_CLIENT_REST_ADDRESS, value: "http://camunda-zeebe-gateway:8080"}
+            - {name: CAMUNDA_CLIENT_GRPC_ADDRESS, value: "http://camunda-zeebe-gateway:26500"}
+            - {name: CAMUNDA_CLIENT_AUTH_METHOD, value: oidc}
+            - {name: CAMUNDA_CLIENT_AUTH_CLIENT_ID, value: svc-payment-exception-api}
+            - name: CAMUNDA_CLIENT_AUTH_CLIENT_SECRET
+              valueFrom: {secretKeyRef: {name: demo-api-clients, key: svc-payment-exception-api}}
+            - {name: CAMUNDA_CLIENT_AUTH_TOKEN_URL, value: "https://keycloak:8443/auth/realms/camunda-platform/protocol/openid-connect/token"}
+            - {name: CAMUNDA_CLIENT_AUTH_AUDIENCE, value: orchestration-api}
+          ports:
+            - {name: https, containerPort: 8443}
+            - {name: management, containerPort: 8081}
+          startupProbe:
+            httpGet: {path: /actuator/health/liveness, port: management, scheme: HTTPS}
+            periodSeconds: 3
+            failureThreshold: 40
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: management, scheme: HTTPS}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: management, scheme: HTTPS}
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 100m, memory: 384Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tls, mountPath: /tls, readOnly: true}
+            - {name: tls-ca, mountPath: /tls-ca, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tls
+          secret: {secretName: demo-tls-payment-exception-api}
+        - name: tls-ca
+          secret: {secretName: demo-tls-ca}
+        - {name: tmp, emptyDir: {}}

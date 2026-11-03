@@ -2,6 +2,7 @@ plugins {
     id 'java-library'
     id 'io.spring.dependency-management' version '1.1.7' apply false
     id 'org.springframework.boot' version '4.1.1' apply false
+    id 'com.google.protobuf' version '0.9.5' apply false
 }
 
 description = 'demo-camunda-k8s - TR FAST P2 workers and provider simulators for the Camunda 8.10 Kubernetes demo'
@@ -11,6 +12,11 @@ ext {
     springBootVersion = '4.1.1'
     camundaVersion = '8.10.4'
     archunitVersion = '1.4.1'
+    // protoc and protobuf-java-util follow the protobuf-java runtime that the Spring Boot BOM manages: generated
+    // code must never be newer than the runtime it runs on.
+    protobufVersion = '4.35.1'
+    avroVersion = '1.12.2'
+    jacocoVersion = '0.8.14'
 }
 
 allprojects {

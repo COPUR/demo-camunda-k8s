@@ -23,10 +23,11 @@ Yerel ve geçici bir demodur; yalnızca **sentetik veri** kullanır. Hedef üret
 6. [Demo senaryosu](#demo-senaryosu)
 7. [Test durumu](#test-durumu)
 8. [Güvenlik modeli](#güvenlik-modeli)
-9. [Komutlar ve ayarlar](#komutlar-ve-ayarlar)
-10. [Sorun giderme](#sorun-giderme)
-11. [Depo yapısı](#depo-yapısı)
-12. [Hedef topolojiden farklar](#hedef-topolojiden-farklar)
+9. [Ödeme istisnası API'si](#ödeme-istisnası-apisi)
+10. [Komutlar ve ayarlar](#komutlar-ve-ayarlar)
+11. [Sorun giderme](#sorun-giderme)
+12. [Depo yapısı](#depo-yapısı)
+13. [Hedef topolojiden farklar](#hedef-topolojiden-farklar)
 
 ---
 
@@ -49,6 +50,7 @@ durur; `install.sh` sonunda okuma komutunu yazdırır.
 | Hub | http://localhost:8070 | BPMN, DMN ve form modelleri (8.10'da Web Modeler + Console = Hub) |
 | Identity | http://localhost:8084 | Kullanıcılar, roller, istemciler |
 | Keycloak | http://localhost:18080/auth | OIDC sağlayıcı (yönetici konsolu demo için gerekmez) |
+| Ödeme istisnası API'si | `./demo.sh api ...` | Aynı vakalar REST ile: kuyruk, vaka, karar, katalog ([aşağıda](#ödeme-istisnası-apisi)) |
 
 Durum kontrolü: `./status.sh`. Her şeyi silmek için: `./uninstall.sh`.
 
@@ -100,9 +102,15 @@ flowchart LR
       S4["sim-ntf<br/>müşteri bildirimi"]
     end
     L["demo-loader Job<br/>modeller + 9 ödeme"]
+    API["payment-exception-api<br/>REST · protobuf · Avro olayları"]
+    AC["demo-api-check Job"]
   end
 
   U -- "port-forward" --> Z & H & I & KC
+  U -- "port-forward (./demo.sh api)" --> API
+  API -- "REST v2: başlat, ara, görevi tamamla" --> Z
+  API -- "client credentials, JWKS (HTTPS)" --> KC
+  AC -- "HTTPS + Bearer" --> API
   W -- "job aktivasyonu" --> Z
   W -- "client credentials" --> KC
   W -- "HTTPS + Bearer (sağlayıcı başına audience)" --> S1 & S2 & S3 & S4
@@ -118,7 +126,7 @@ flowchart LR
 ```mermaid
 flowchart TB
   subgraph mac["macOS host"]
-    cli["install.sh · open.sh · status.sh · uninstall.sh<br/>özel kubeconfig, yalnız yerel API sunucusu"]
+    cli["demo.sh · install.sh · open.sh · status.sh · api.sh · uninstall.sh<br/>özel kubeconfig, yalnız yerel API sunucusu"]
     subgraph dd["Docker Desktop VM"]
       img["İmaj bpo-payments-demo:local"]
       subgraph node["K8s node (kind modunda desktop-control-plane)"]
@@ -131,15 +139,17 @@ flowchart TB
           d4["Deployment camunda-connectors"]
           d5["Deployment sim-psg-tr · sim-acc · sim-pay · sim-ntf"]
           d6["Deployment bpo-worker-payments"]
+          d7["Deployment payment-exception-api (1 kopya)"]
           j1["Job keycloak-clients"]
           j2["Job demo-loader"]
+          j3["Job demo-api-check"]
           sec[("Secrets: DB, OIDC, istemci, TLS CA, presenter")]
         end
       end
     end
   end
   cli --> nsx
-  img -. "ctr images import (kind modu)" .-> d5 & d6
+  img -. "ctr images import (kind modu)" .-> d5 & d6 & d7
 ```
 
 ### Sınıf diyagramı: worker'ın hexagonal yapısı
@@ -213,10 +223,12 @@ flowchart TD
   H --> I[PostgreSQL + Keycloak]
   I --> J[helm upgrade --install camunda --wait]
   J --> K[Job keycloak-clients]
-  K --> L[Simülatörler + worker]
+  K --> L[Simülatörler, worker, istisna API'si]
   L --> M[Job demo-loader: deploy, 9 örnek, 3 uyandırma]
   M --> N{acc holdsCaptured = 4?}
-  N -- evet --> O([Hazır: adresler ve şifre komutu])
+  N -- evet --> Q{Job demo-api-check:<br/>API gerçek token'larla}
+  Q -- geçti --> O([Hazır: adresler ve şifre komutu])
+  Q -- kaldı --> X2([Hata: kontrolün son satırları])
   N -- hayır --> P([Uyarı: ./status.sh])
 ```
 
@@ -244,10 +256,11 @@ sequenceDiagram
   Z->>KC: realm camunda-platform
   S->>K: Job keycloak-clients
   K->>KC: servis istemcileri ve audience'lar
-  S->>K: simülatörler ve worker
+  S->>K: simülatörler, worker, istisna API'si
   S->>K: Job demo-loader
   K->>Z: /v2/deployments, /v2/process-instances, /v2/messages/publication
   S->>K: logs sim-acc (holdsCaptured)
+  S->>K: Job demo-api-check (401, katalog, kuyruk, vaka, 403)
   S-->>P: adresler + şifre okuma komutu
 ```
 
@@ -336,10 +349,13 @@ girmez; `OutputVariables` bunları çalışma anında reddeder.
 1. **Operate:** `pay-instant-exception`, 9 örnek. Yerleşmiş bir örneği açın: yol `Task_CaptureHold` üzerinden
    geçer, değişkenler yalnızca kimlik ve enum.
 2. **Operate, bekleme durumları (8.10):** bekleyen örneklerde sürecin neyi beklediği görünür.
-3. **Tasklist:** belirsiz kalan üç ödeme. Birini yerleştirin, birini reddedin, birini süpervizöre yükseltip
-   orada kapatın.
-4. **Hub:** P2 modeli, `lib-await-external-status` ve iki DMN.
-5. **Güvenlik:** `kubectl -n bpo-demo-ms logs deploy/sim-psg-tr` kabul edilen audience'ı ve çağrı sayısını
+3. **Tasklist:** belirsiz kalan üç ödeme. Birini yerleştirin, birini reddedin.
+4. **REST API:** üçüncüsü aynı kuyrukta API'den de görünür. `./demo.sh api queue` operasyon kuyruğunu,
+   `./demo.sh api case demo-tr-unres-003` vakayı ve ETag'ini gösterir. `./demo.sh api decide demo-tr-unres-003
+   ESCALATE` vakayı süpervizöre yükseltir (`./demo.sh api queue supervisor`), `./demo.sh api decide
+   demo-tr-unres-003 SETTLED` orada kapatır. Tasklist'te ve Operate'te aynı görev ve yol görünür.
+5. **Hub:** P2 modeli, `lib-await-external-status` ve iki DMN.
+6. **Güvenlik:** `kubectl -n bpo-demo-ms logs deploy/sim-psg-tr` kabul edilen audience'ı ve çağrı sayısını
    gösterir; geçerli token'ı olmayan çağrı 401 veya 403 alır.
 
 ---
@@ -351,8 +367,12 @@ girmez; `OutputVariables` bunları çalışma anında reddeder.
 | k3s (Linux sandbox, `DEMO_CLUSTER=current`, `DEMO_IMAGE_LOAD` ile) | `./install.sh` baştan sona çalıştı; 14 pod çalışıyor, doğrulama 4 bloke tahsilini gördü |
 | Docker Desktop, kind modu (macOS) | Temiz klondan `./install.sh` baştan sona çalıştı (çıkış kodu 0); 12 pod çalışıyor, doğrulama 4 bloke tahsilini gördü |
 | Docker Desktop kubeadm modu, OrbStack, Rancher Desktop, minikube | Denenmedi |
+| İstisna API'si, gerçek Camunda 8.10.4 (Docker, `app/payment-exception-api/e2e/run.sh`) | 4 uçtan uca test art arda 10 koşuda geçti: vaka açma ve tekrarı, kuyruk ve sayfalama, eskalasyon, karar ve ödeme sonucu; API'nin motor kimliği yalnızca dört P2 yetkisiyle |
+| İstisna API'si, Keycloak 26.7.5 + Camunda 8.10.4 OIDC (Docker, demo ayarlarıyla) | `keycloak-clients` betiği iki kez çalıştı; gerçek token'larla kurulumun API kontrolü (`demo-api-check`) ve `./demo.sh api`'nin bütün komutları geçti. Şifreleri komut satırından çıkaran sürüm üç kez daha çalıştı; hiçbir sürecin komut satırında şifre ya da sır görülmedi |
 
-Süreler yaklaşıktır ve ağa, makineye göre değişir.
+Yukarıdaki iki küme satırı API'den önceki sürüme aittir; bu sürümle `./install.sh` bir kümede baştan sona
+denenmedi. API'nin parçaları son iki satırdaki gibi kümesiz denendi. Süreler yaklaşıktır ve ağa, makineye göre
+değişir.
 
 ---
 
@@ -363,13 +383,39 @@ Süreler yaklaşıktır ve ağa, makineye göre değişir.
 | Kimlik bilgileri | `install.sh` içinde `openssl rand` ile üretilir, yalnızca Secret'larda durur, hiçbir çıktıya yazılmaz |
 | İnsan girişi | Keycloak OIDC, kullanıcı `presenter` |
 | Servis girişi | Client credentials; sağlayıcı başına audience (`aud-svc-psg-tr`, `aud-svc-acc-accounts-ledger`, `aud-svc-pay-initiation-settlement`, `aud-svc-ntf`) |
+| İstisna API'si | Audience `payment-exception-api`, işlem başına kapsam (`exceptions:read`, `exceptions:raise`, `exceptions:decide`), karar için kuyruk grubu (`pay-tr-fast-ops`, `pay-tr-fast-supervisor`); API'nin Camunda'daki kimliği `svc-payment-exception-api` yalnızca P2'de dört yetkiye sahip |
 | Sağlayıcı tarafı | Simülatörler imza, issuer, süre, audience ve çağıranı (azp) doğrular |
-| Taşıma | Keycloak ve simülatörler HTTPS (7 günlük demo CA); Camunda ↔ Keycloak/PostgreSQL namespace içinde HTTP |
+| Taşıma | Keycloak, simülatörler ve istisna API'si HTTPS (7 günlük demo CA); Camunda ↔ Keycloak/PostgreSQL namespace içinde HTTP |
 | Ağ | Varsayılan ret NetworkPolicy ve akış başına izinler. Tarayıcı portları (8080, 8084, 8081, 8060) ile Keycloak (18080, 8443) her kaynaktan, başka namespace'ler dahil, erişilebilir. Docker Desktop NetworkPolicy uygulamaz; orada sınır ClusterIP servisleri ve 127.0.0.1 port-forward'larıdır. |
 | Pod'lar | Restricted Pod Security, root değil, tüm capability'ler düşürülmüş |
-| Erişim | `open.sh` yalnızca 127.0.0.1'e bağlanır |
+| Erişim | `open.sh` ve `./demo.sh api` yalnızca 127.0.0.1'e bağlanır; `./demo.sh api` istemci sırlarını ve token'ları komut satırına yazmaz |
 | Küme | Betikler yalnızca API sunucusu bu makinede olan kümeye çalışır, kendi kubeconfig kopyasıyla |
 | İmajlar | Yerel imaj dışındakiler digest ile sabit; Helm şeması sha256 ile doğrulanır |
+
+---
+
+## Ödeme istisnası API'si
+
+`app/payment-exception-api`, istisna vakaları için REST API'dir: vakayı açar, çalışma kuyruğunu listeler,
+inceleme kararını alır ve istisna durumu kataloğu ile hata kodu deposunu sunar. Gövdeler protobuf (ikili ve
+proto3 JSON), olaylar Avro; kayıt Camunda'dadır. `./demo.sh up` onu da kurar (`k8s/45-payment-exception-api.yaml`,
+tek kopya, HTTPS 8443) ve son adımda gerçek token'larla dener. İmaj derlemesi modülü test eder ve satır ile dal
+kapsamını %87'nin altına düşürmez. Ayrıntılar: [app/payment-exception-api/README.md](app/payment-exception-api/README.md).
+
+`./demo.sh api`, API'yi demonun istemcileriyle çağırır. Her çalıştırma 127.0.0.1'de kendi port-forward'larını
+açar (`./open.sh` açık kalabilir), Keycloak'tan token alır ve iki sunucunun sertifikasını demo CA'sıyla denetler.
+Gövde stdout'a, durum ve başlıklar stderr'e gider; hata durumu `problem+json` gövdesiyle birlikte çıkış kodu 1'dir.
+
+| Komut | İstemci (Keycloak) | Ne yapar |
+|---|---|---|
+| `./demo.sh api queue [ops\|supervisor]` | `demo-ops-reviewer` / `demo-supervisor-reviewer` | Kuyrukta karar bekleyen vakalar, en eskisi önce |
+| `./demo.sh api case demo-tr-unres-001` | `demo-ops-reviewer` | Vaka, açık inceleme görevi ve `ETag` |
+| `./demo.sh api raise demo-tr-yeni-001` | `demo-exception-raiser` | Vaka açar (TR, FAST). Senaryosu olmayan ödemeye psg-tr ACSC der ve vaka kendiliğinden yerleşir; açık vakası olan ödeme `409 PEX-3002` alır |
+| `./demo.sh api decide demo-tr-unres-001 SETTLED\|REJECTED\|ESCALATE` | görevin kuyruğuna göre | Vakayı okur, `If-Match` ve yeni bir `Idempotency-Key` ile karar verir |
+| `./demo.sh api catalog [EXC-001\|PEX-3004]` | `demo-ops-reviewer` | İstisna durumu kataloğu ve hata kodu deposu |
+
+Kuyruk üyeliği Keycloak gruplarından gelir (`groups` claim'i); `demo-exception-raiser` karar veremez (`403`).
+İstemciler yalnızca servis hesabıdır, böylece demo tarayıcı akışı gerektirmez.
 
 ---
 
@@ -377,9 +423,9 @@ Süreler yaklaşıktır ve ağa, makineye göre değişir.
 
 | Komut | Ne yapar |
 |---|---|
-| `./demo.sh up\|open\|login\|status\|down` | Tek giriş noktası: aşağıdaki betikleri çağırır; `login` presenter şifresini ekrana yazmadan panoya kopyalar |
+| `./demo.sh up\|open\|login\|status\|api\|down` | Tek giriş noktası: aşağıdaki betikleri çağırır; `login` presenter şifresini ekrana yazmadan panoya kopyalar; `api` istisna API'sini çağırır ([komutlar](#ödeme-istisnası-apisi)) |
 | `./install.sh` | Kurar veya günceller (tekrar çalıştırılabilir) |
-| `./open.sh` | Arayüzleri 127.0.0.1'de yayınlar; kopan bağlantıyı yeniden kurar, port doluysa başlamadan hata verir; Ctrl-C ile kapanır |
+| `./open.sh` | Arayüzleri ve istisna API'sini (18443) 127.0.0.1'de yayınlar; kopan bağlantıyı yeniden kurar, port doluysa başlamadan hata verir; Ctrl-C ile kapanır |
 | `./status.sh` | Pod'lar, yükleyici sonucu, simülatör sayaçları, worker uyarıları, 9 ödeme için beklenen ve gerçek durum tablosu |
 | `./uninstall.sh` | Helm sürümünü ve namespace'i siler (veri ve Secret'lar dahil) |
 
@@ -409,6 +455,8 @@ Başka yerel kümeler (kind, k3s, minikube, OrbStack, Rancher Desktop): API sunu
 | Giriş başarısız | Yanlış kullanıcı/şifre | Kullanıcı `presenter`; şifre Secret `demo-presenter` içinde |
 | Sertifika hatası (7 gün sonra) | Demo CA süresi doldu | `./install.sh` tekrar: süresi bir günden az kalan CA'yı ve sunucu sertifikalarını yeniler, Keycloak'u yeniden başlatır |
 | `$'\r': command not found` | Windows'ta CRLF ile klonlandı | `.gitattributes` LF'yi zorlar; eski klonu silip yeniden klonlayın |
+| `the payment exception API check failed` | API kontrolü (`demo-api-check`) beklenen yanıtı almadı; son satırları bunu yazdırır | `kubectl -n bpo-demo-ms logs deploy/payment-exception-api --tail=50`; 401 ise Keycloak istemcileri (`job/keycloak-clients`), 503 `PEX-9001` ise Camunda erişimi; sonra `./install.sh` tekrar |
+| `./demo.sh api` `no port-forward to ...` | Pod hazır değil ya da kurulum yarım | `./status.sh`, gerekirse `./install.sh` |
 
 ```bash
 ./status.sh
@@ -421,18 +469,20 @@ kubectl -n bpo-demo-ms logs <pod> --tail=50
 ## Depo yapısı
 
 ```text
-demo.sh                tek giriş noktası (up · open · login · status · down)
-install.sh  open.sh  status.sh  uninstall.sh
+demo.sh                tek giriş noktası (up · open · login · status · api · down)
+install.sh  open.sh  status.sh  uninstall.sh  api.sh
 lib/common.sh          küme seçimi, yerel API koruması, imaj aktarımı
 helm/                  values-camunda.yaml, chart-lock.yaml (camunda-platform 15.1.1, sha256)
 k8s/                   00 namespace · 10 postgres · 20 keycloak · 30 keycloak istemcileri
-                       40 simülatörler + worker · 50 network policy · 60 yükleyici Job
+                       40 simülatörler + worker · 45 istisna API'si · 50 network policy
+                       60 yükleyici Job · 65 API kontrolü Job
 models/                P2 BPMN, L3 kütüphane süreci, 2 DMN, 2 form
-sample-data/           scenarios.json (9 sentetik ödeme), load.sh
+sample-data/           scenarios.json (9 sentetik ödeme), load.sh, api-check.sh
 app/                   Gradle çok modüllü uygulama ve çok aşamalı Dockerfile
   bpo-worker-kit/      idempotency anahtarları, çıktı korkuluğu, sağlayıcı HTTP, hata eşleme
   bpo-worker-payments/ P2 job worker'ları (handler → port → adapter)
   domain-simulator/    sağlayıcı sözleşmelerinin süreç içi taklidi
+  payment-exception-api/ istisna vakaları REST API'si (protobuf, Avro olayları, katalog); e2e/run.sh gerçek motor testleri
   payments-demo/       tek imaj: worker'lar veya bir simüle sağlayıcı (rol başına Deployment)
 ```
 
@@ -446,7 +496,9 @@ Bunlar bilinçli demo kısayollarıdır.
 |---|---|
 | 1 broker, 1 partition, replikasyon 1 | 3 broker, 6 partition, replikasyon 3, PDB minAvailable 2 |
 | İkincil depolama PostgreSQL (RDBMS) | OpenSearch |
-| Worker ve yükleyici admin rolünde | Her istemcinin kendi yetkileri |
+| Worker ve yükleyici admin rolünde (istisna API'sinin istemcisi yalnızca kendi dört yetkisiyle) | Her istemcinin kendi yetkileri |
+| İstisna API'si tek kopya, idempotency kaydı ve outbox bellekte, olaylar log'a | Birden çok kopya, paylaşılan idempotency deposu, kalıcı outbox, Kafka/Redpanda |
+| Kuyruk üyeleri servis hesabı (`demo-ops-reviewer`, `demo-supervisor-reviewer`) | Kişiler PKCE ile giriş yapar, aynı audience, kapsam ve gruplarla |
 | 7 günlük demo CA, Camunda iç trafiği HTTP | Mesh, katı mTLS ve DPoP |
 | Sağlayıcılar simülatör | Yayımlanmış katalog sözleşmeleri (`acc`, `pay`, `psg-tr`, `ntf`) |
 | Connectors ve Hub açık | Kapalı; her dış çağrı sözleşmesi olan bir worker'dan geçer |

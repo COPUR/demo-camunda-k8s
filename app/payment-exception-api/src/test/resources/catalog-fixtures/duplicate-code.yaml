@@ -1,0 +1,5 @@
+version: 1.0.0
+exceptionCases: []
+errors:
+  - {code: PEX-1001, name: A, title: t, category: VALIDATION, httpStatus: 400, retryable: false, subDomain: s, description: d, remediation: r}
+  - {code: PEX-1001, name: B, title: t, category: VALIDATION, httpStatus: 400, retryable: false, subDomain: s, description: d, remediation: r}

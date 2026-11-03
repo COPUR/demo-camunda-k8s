@@ -1,0 +1,30 @@
+{
+  "type": "record",
+  "name": "PaymentExceptionEvent",
+  "namespace": "com.bank.bpo.exceptions.events.v1",
+  "doc": "One fact about a payment exception case, as payment-exception-api publishes it on bpo.payment-exception.events.v1. The record key is the payment id, so a case's events keep their order on one partition. Encoded with Avro single-object encoding (C3 01, the schema's 64-bit fingerprint, then the binary record). Synthetic data only.",
+  "fields": [
+    {"name": "eventId", "type": {"type": "string", "logicalType": "uuid"},
+     "doc": "Derived from the fact (name-based UUID): a redelivered or re-published event has the same id, so a consumer de-duplicates by it."},
+    {"name": "occurredAt", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "paymentId", "type": "string", "doc": "The payment the case is about: demo-tr-* only."},
+    {"name": "interactionId", "type": {"type": "string", "logicalType": "uuid"},
+     "doc": "The x-fapi-interaction-id of the API call that caused the fact, to follow it across logs."},
+    {"name": "actor", "type": {"type": "record", "name": "Actor", "fields": [
+      {"name": "subject", "type": "string", "doc": "Who caused the fact: the token's preferred_username, or the service account."}
+    ]}},
+    {"name": "workflowInstanceKey", "type": "long", "doc": "The pay-instant-exception process instance that is the case's record."},
+    {"name": "payload", "doc": "What happened.", "type": [
+      {"type": "record", "name": "ExceptionCaseRaised", "fields": [
+        {"name": "jurisdiction", "type": "string", "doc": "ISO 3166-1 alpha-2; the case is served in this jurisdiction."},
+        {"name": "rail", "type": {"type": "enum", "name": "Rail", "symbols": ["UNKNOWN", "FAST"], "default": "UNKNOWN"}}
+      ]},
+      {"type": "record", "name": "ExceptionDecisionSubmitted", "fields": [
+        {"name": "reviewTaskId", "type": "long"},
+        {"name": "reviewLevel", "type": {"type": "enum", "name": "ReviewLevel", "symbols": ["UNKNOWN", "OPERATIONS", "SUPERVISOR"], "default": "UNKNOWN"}},
+        {"name": "queue", "type": ["null", "string"], "default": null},
+        {"name": "decision", "type": {"type": "enum", "name": "Decision", "symbols": ["UNKNOWN", "SETTLED", "REJECTED", "ESCALATE", "EXPIRED"], "default": "UNKNOWN"}}
+      ]}
+    ]}
+  ]
+}

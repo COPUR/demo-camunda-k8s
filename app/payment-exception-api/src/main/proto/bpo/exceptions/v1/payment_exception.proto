@@ -1,0 +1,69 @@
+// Resources of the case-management sub-domain. Served as application/json (proto3 JSON mapping) and
+// application/x-protobuf; errors are application/problem+json (RFC 9457) with a catalogued code.
+//
+//   POST /api/v1/payment-exceptions                       RaiseExceptionCaseRequest -> 201 ExceptionCase
+//   GET  /api/v1/payment-exceptions/{payment_id}          -> 200 ExceptionCase (ETag)
+//   GET  /api/v1/payment-exceptions?queue=&reviewLevel=&pageSize=&pageToken=
+//                                                         -> 200 ListExceptionCasesResponse (cases in review)
+//   POST /api/v1/payment-exceptions/{payment_id}/decisions SubmitDecisionRequest (If-Match) -> 202 DecisionReceipt
+//
+// Every POST carries an Idempotency-Key header.
+syntax = "proto3";
+
+package bpo.exceptions.v1;
+
+import "bpo/exceptions/v1/value_objects.proto";
+import "google/protobuf/timestamp.proto";
+
+option java_package = "com.bank.bpo.exceptions.contract.v1";
+option java_multiple_files = true;
+option java_outer_classname = "PaymentExceptionProto";
+
+// The ExceptionCase aggregate as a resource. The payment id is its identity: one case per payment.
+message ExceptionCase {
+  // PaymentId: synthetic only, demo-tr- followed by 1 to 40 of [a-z0-9-].
+  string payment_id = 1;
+  // Jurisdiction: ISO 3166-1 alpha-2.
+  string jurisdiction = 2;
+  Rail rail = 3;
+  CaseState state = 4;
+  SchemeStatus scheme_status = 5;
+  ExceptionReason reason = 6;
+  // Set exactly when state is CASE_STATE_IN_REVIEW.
+  ReviewTask open_review = 7;
+  // The last decision recorded on the case, if any.
+  Decision decision = 8;
+  Outcome outcome = 9;
+  // True while the process instance has an open incident (an engineering matter, see the catalog).
+  bool incident = 10;
+  google.protobuf.Timestamp raised_at = 11;
+  // The process instance in Operate; for support only, never an identity.
+  int64 workflow_instance_key = 12;
+  // Same value as the ETag header. A decision sends it back in If-Match.
+  string etag = 13;
+}
+
+message RaiseExceptionCaseRequest {
+  string payment_id = 1;
+  string jurisdiction = 2;
+  Rail rail = 3;
+}
+
+message SubmitDecisionRequest {
+  Decision decision = 1;
+}
+
+// The workflow took the decision; pay's outcome follows asynchronously on the case.
+message DecisionReceipt {
+  string payment_id = 1;
+  int64 review_task_id = 2;
+  ReviewLevel level = 3;
+  Decision decision = 4;
+  google.protobuf.Timestamp submitted_at = 5;
+}
+
+message ListExceptionCasesResponse {
+  repeated ExceptionCase exception_cases = 1;
+  // Empty on the last page.
+  string next_page_token = 2;
+}

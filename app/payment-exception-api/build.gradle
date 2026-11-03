@@ -1,0 +1,89 @@
+apply plugin: 'org.springframework.boot'
+apply plugin: 'com.google.protobuf'
+apply plugin: 'jacoco'
+
+description = 'payment-exception-api - REST API (protobuf and proto3 JSON) over the instant payment exception cases, with Avro domain events'
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+    implementation 'org.springframework.boot:spring-boot-starter-security-oauth2-resource-server'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'io.camunda:camunda-spring-boot-starter'
+    implementation 'com.google.protobuf:protobuf-java'
+    implementation "com.google.protobuf:protobuf-java-util:${protobufVersion}"
+    implementation "org.apache.avro:avro:${avroVersion}"
+    implementation 'org.apache.kafka:kafka-clients'
+    implementation 'tools.jackson.dataformat:jackson-dataformat-yaml'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-security-test'
+    testImplementation 'com.tngtech.archunit:archunit-junit5:' + archunitVersion
+}
+
+protobuf {
+    protoc { artifact = "com.google.protobuf:protoc:${protobufVersion}" }
+}
+
+bootJar {
+    archiveFileName = 'payment-exception-api.jar'
+}
+tasks.named('jar') { enabled = false }
+
+jacoco {
+    toolVersion = jacocoVersion
+}
+
+// Generated protobuf code and the Spring Boot entry point are not ours to test; everything else is.
+def coverageExclusions = ['com/bank/bpo/exceptions/contract/**', 'com/bank/bpo/exceptions/PaymentExceptionApiApplication*']
+
+tasks.named('jacocoTestReport') {
+    dependsOn tasks.named('test')
+    reports {
+        xml.required = true
+        html.required = true
+    }
+    classDirectories.setFrom(files(classDirectories.files.collect { fileTree(dir: it, exclude: coverageExclusions) }))
+}
+
+tasks.named('jacocoTestCoverageVerification') {
+    dependsOn tasks.named('test')
+    classDirectories.setFrom(files(classDirectories.files.collect { fileTree(dir: it, exclude: coverageExclusions) }))
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                minimum = 0.87
+            }
+            limit {
+                counter = 'BRANCH'
+                minimum = 0.87
+            }
+        }
+    }
+}
+
+tasks.named('test') {
+    useJUnitPlatform { excludeTags 'e2e' }
+    finalizedBy tasks.named('jacocoTestReport')
+}
+tasks.named('check') { dependsOn tasks.named('jacocoTestCoverageVerification') }
+
+// The API against a real Camunda 8.10 engine, which e2e/run.sh starts in Docker and passes in as -De2e.* system
+// properties (addresses and the paths of password files, never a password). Not part of test or check.
+def e2eProperties = ['e2e.camunda.rest-address', 'e2e.camunda.grpc-address', 'e2e.camunda.admin-user',
+                     'e2e.camunda.admin-password-file', 'e2e.camunda.api-password-file', 'e2e.models']
+tasks.register('e2eTest', Test) {
+    description = 'Runs the tests tagged e2e against the engine that e2e/run.sh started.'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform { includeTags 'e2e' }
+    e2eProperties.each { name ->
+        def value = providers.systemProperty(name)
+        if (value.isPresent()) {
+            systemProperty name, value.get()
+        }
+    }
+    outputs.upToDateWhen { false }
+    testLogging { events 'passed', 'skipped', 'failed'; exceptionFormat 'full' }
+}
