@@ -5,8 +5,13 @@
   "components": [
     {
       "type": "text",
-      "id": "Field_PaymentHint",
-      "text": "Open payment {{paymentId}} in the payments operations view and check the scheme record there. This task holds no payment detail; record what the scheme shows."
+      "id": "Field_CaseContext",
+      "text": "### Payment {{paymentId}} · {{exceptionCode}}\n\n{{#if exceptionCode = \"EXC-001\"}}The scheme status is still unknown: FAST answered **{{lastSchemeStatus}}** to all {{schemeStatusReads}} status reads.{{/if}}{{#if exceptionCode = \"EXC-002\"}}FAST answered **{{lastSchemeStatus}}**, a status that is neither ACSC (settled) nor RJCT (rejected).{{/if}}\n\n- Rail: {{jurisdiction}} {{rail}}\n- Queue: {{exceptionRouting.opsQueue}}\n- SLA: {{exceptionRouting.opsSla}} from the task's creation (the task's due date). After that the case moves to {{exceptionRouting.supervisorQueue}} without a decision from you.\n\nThe task holds ids and codes only, never an amount, an account or a name."
+    },
+    {
+      "type": "text",
+      "id": "Field_Runbook",
+      "text": "**Runbook ({{exceptionCode}})**\n\n1. Open Operate (`./demo.sh open`, then http://localhost:8080/operate) and filter the process instances by **Business ID** {{paymentId}}.\n2. Open the called instance *Await external status (library)*. Every *Read scheme status* step and the last status FAST gave are there; in this demo the FAST scheme is the psg-tr simulator, so that is the scheme record.\n3. Choose Settled or Rejected only for a final status the scheme confirms, and give the reason. Anything else: escalate, with the reason."
     },
     {
       "type": "radio",
@@ -18,6 +23,32 @@
         { "label": "Settled at the scheme", "value": "SETTLED" },
         { "label": "Rejected at the scheme", "value": "REJECTED" },
         { "label": "Escalate to the supervisor", "value": "ESCALATE" }
+      ]
+    },
+    {
+      "type": "select",
+      "id": "Field_DecisionReason",
+      "key": "decisionReason",
+      "label": "Reason for the decision",
+      "validate": { "required": true },
+      "conditional": { "hide": "=exceptionDecision = null or exceptionDecision = \"ESCALATE\"" },
+      "values": [
+        { "label": "The FAST record shows a final status", "value": "SCHEME_RECORD_FINAL" },
+        { "label": "The FAST operations desk confirmed it", "value": "SCHEME_DESK_CONFIRMED" },
+        { "label": "End-of-day reconciliation matches it", "value": "RECONCILIATION_MATCH" }
+      ]
+    },
+    {
+      "type": "select",
+      "id": "Field_EscalationReason",
+      "key": "escalationReason",
+      "label": "Reason for escalating",
+      "validate": { "required": true },
+      "conditional": { "hide": "=exceptionDecision != \"ESCALATE\"" },
+      "values": [
+        { "label": "The scheme has no record of the payment", "value": "SCHEME_RECORD_MISSING" },
+        { "label": "The scheme record conflicts with the gateway's", "value": "SCHEME_RECORD_CONFLICT" },
+        { "label": "Beyond the operations reviewer's authority", "value": "NEEDS_SUPERVISOR_AUTHORITY" }
       ]
     }
   ]

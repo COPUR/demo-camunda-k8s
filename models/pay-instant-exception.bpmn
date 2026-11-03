@@ -16,7 +16,11 @@
        payment to EXCEPTION_OWNED_BY_BPO and the event bridge starts this instance with paymentId, jurisdiction
        and rail. From then on only this instance commands the payment: it reads the scheme status (never sends
        again), captures or releases the hold exactly once, tells pay and the customer. A status that stays
-       unknown goes to payments operations; the outcome of record is pay's. Camunda holds ids and enums only. -->
+       unknown goes to payments operations; the outcome of record is pay's. Camunda holds ids and enums only.
+       Demo change (not in the source models): the review tasks carry read-only case context for Tasklist and
+       Operate (exceptionCode, lastSchemeStatus, schemeStatusReads, escalationCode, escalationReason) and record an
+       enum decisionReason. The codes are those of the exception catalogue (EXC-001 to EXC-005). pay is not told
+       about any of them; its workers fetch only paymentId and exceptionDecision. -->
   <bpmn:process id="pay-instant-exception" name="Instant payment exception" isExecutable="true">
     <bpmn:extensionElements>
       <zeebe:versionTag value="0.1.0" />
@@ -37,6 +41,15 @@
       <bpmn:outgoing>Flow_ToSchemeStatus</bpmn:outgoing>
     </bpmn:callActivity>
     <bpmn:boundaryEvent id="BoundaryEvent_StatusTimeout" name="Status still unknown" attachedToRef="Task_AwaitSchemeStatus">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <!-- lib-await-external-status 0.1.0 throws Err_StatusTimeout only after its fourth read answered PDNG
+               (Flow_LastPending); a call activity's outputs are not applied on an error, so the facts are set here. -->
+          <zeebe:output source="=&#34;EXC-001&#34;" target="exceptionCode" />
+          <zeebe:output source="=&#34;PDNG&#34;" target="lastSchemeStatus" />
+          <zeebe:output source="=4" target="schemeStatusReads" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
       <bpmn:outgoing>Flow_StatusTimeoutToJoin</bpmn:outgoing>
       <bpmn:errorEventDefinition id="ErrorEventDefinition_StatusTimeout" errorRef="Error_StatusTimeout" />
     </bpmn:boundaryEvent>
@@ -55,6 +68,13 @@
     <bpmn:businessRuleTask id="Task_RouteException" name="Route to payments operations">
       <bpmn:extensionElements>
         <zeebe:calledDecision decisionId="pay-exception-routing" resultVariable="exceptionRouting" bindingType="versionTag" versionTag="0.1.0" />
+        <zeebe:ioMapping>
+          <!-- With output mappings only the mapped variables leave the task, so the routing result is mapped too.
+               No exceptionCode yet means the default flow Flow_StatusUnclear: a final status other than ACSC/RJCT. -->
+          <zeebe:output source="=exceptionRouting" target="exceptionRouting" />
+          <zeebe:output source="=if exceptionCode = null then &#34;EXC-002&#34; else exceptionCode" target="exceptionCode" />
+          <zeebe:output source="=if lastSchemeStatus = null then schemeStatus else lastSchemeStatus" target="lastSchemeStatus" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>Flow_ToRouteException</bpmn:incoming>
       <bpmn:outgoing>Flow_ToOpsReview</bpmn:outgoing>
@@ -65,6 +85,11 @@
         <zeebe:formDefinition formId="pay-exception-ops-decision" bindingType="deployment" />
         <zeebe:ioMapping>
           <zeebe:output source="=exceptionDecision" target="exceptionDecision" />
+          <!-- Both reasons are optional for the engine: a client that completes the task with exceptionDecision
+               alone (the exception API) leaves them null. -->
+          <zeebe:output source="=if exceptionDecision = &#34;ESCALATE&#34; then &#34;EXC-003&#34; else null" target="escalationCode" />
+          <zeebe:output source="=if exceptionDecision = &#34;ESCALATE&#34; then escalationReason else null" target="escalationReason" />
+          <zeebe:output source="=if exceptionDecision = &#34;ESCALATE&#34; then null else decisionReason" target="decisionReason" />
         </zeebe:ioMapping>
         <zeebe:assignmentDefinition candidateGroups="=[exceptionRouting.opsQueue]" />
         <zeebe:taskSchedule dueDate="=now() + duration(exceptionRouting.opsSla)" />
@@ -73,6 +98,12 @@
       <bpmn:outgoing>Flow_ToOpsDecision</bpmn:outgoing>
     </bpmn:userTask>
     <bpmn:boundaryEvent id="BoundaryEvent_OpsSla" name="Operations SLA expired" attachedToRef="Task_OpsReview">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:output source="=&#34;EXC-004&#34;" target="escalationCode" />
+          <zeebe:output source="=&#34;OPS_SLA_EXPIRED&#34;" target="escalationReason" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
       <bpmn:outgoing>Flow_OpsSlaToJoin</bpmn:outgoing>
       <bpmn:timerEventDefinition id="TimerEventDefinition_OpsSla">
         <bpmn:timeDuration>=exceptionRouting.opsSla</bpmn:timeDuration>
@@ -94,6 +125,7 @@
         <zeebe:formDefinition formId="pay-exception-supervisor-decision" bindingType="deployment" />
         <zeebe:ioMapping>
           <zeebe:output source="=exceptionDecision" target="exceptionDecision" />
+          <zeebe:output source="=decisionReason" target="decisionReason" />
         </zeebe:ioMapping>
         <zeebe:assignmentDefinition candidateGroups="=[exceptionRouting.supervisorQueue]" />
         <zeebe:taskSchedule dueDate="=now() + duration(exceptionRouting.supervisorSla)" />
@@ -112,6 +144,7 @@
         <zeebe:ioMapping>
           <!-- No money moves on an expiry: pay takes the payment back (HANDED_BACK) and the hold stays. -->
           <zeebe:output source="=&#34;EXPIRED&#34;" target="exceptionDecision" />
+          <zeebe:output source="=&#34;SUPERVISOR_SLA_EXPIRED&#34;" target="decisionReason" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>Flow_ToDecisionExpired</bpmn:incoming>

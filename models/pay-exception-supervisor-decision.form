@@ -5,8 +5,13 @@
   "components": [
     {
       "type": "text",
-      "id": "Field_PaymentHint",
-      "text": "Open payment {{paymentId}} in the payments operations view. Record the scheme record only when the scheme has confirmed it; pay checks the decision against the gateway's record."
+      "id": "Field_CaseContext",
+      "text": "### Payment {{paymentId}} · escalated ({{escalationCode}})\n\n{{#if escalationCode = \"EXC-003\"}}Operations escalated the case. Reason: **{{escalationReason}}**.{{/if}}{{#if escalationCode = \"EXC-004\"}}Nobody in operations decided within {{exceptionRouting.opsSla}} (reason **{{escalationReason}}**).{{/if}}\n\n- Origin: {{exceptionCode}}, FAST's last answer **{{lastSchemeStatus}}**{{#if schemeStatusReads != null}} after {{schemeStatusReads}} status reads{{/if}}\n- Rail: {{jurisdiction}} {{rail}}\n- Queue: {{exceptionRouting.supervisorQueue}}\n- SLA: {{exceptionRouting.supervisorSla}} from the task's creation (the task's due date). Without a decision pay takes the payment back (HANDED_BACK) and the hold stays.\n\nThe task holds ids and codes only, never an amount, an account or a name."
+    },
+    {
+      "type": "text",
+      "id": "Field_Runbook",
+      "text": "**Runbook ({{escalationCode}})**\n\n1. Open Operate (`./demo.sh open`, then http://localhost:8080/operate) and filter the process instances by **Business ID** {{paymentId}}.\n2. The instance history shows how the case got here; the called instance *Await external status (library)* holds the reads of the scheme record (the psg-tr simulator in this demo).\n3. Record the scheme record only when the scheme has confirmed it; pay checks the decision against the gateway's record. A supervisor cannot escalate further."
     },
     {
       "type": "radio",
@@ -17,6 +22,19 @@
       "values": [
         { "label": "Settled at the scheme", "value": "SETTLED" },
         { "label": "Rejected at the scheme", "value": "REJECTED" }
+      ]
+    },
+    {
+      "type": "select",
+      "id": "Field_DecisionReason",
+      "key": "decisionReason",
+      "label": "Reason for the decision",
+      "validate": { "required": true },
+      "conditional": { "hide": "=exceptionDecision = null" },
+      "values": [
+        { "label": "The FAST record shows a final status", "value": "SCHEME_RECORD_FINAL" },
+        { "label": "The FAST operations desk confirmed it", "value": "SCHEME_DESK_CONFIRMED" },
+        { "label": "End-of-day reconciliation matches it", "value": "RECONCILIATION_MATCH" }
       ]
     }
   ]
