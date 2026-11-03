@@ -78,3 +78,45 @@ load_image() {
     info "node $node shares Docker's image store; no load needed"
   fi
 }
+
+# payments_table SCENARIOS VARIABLES_JSON INSTANCES_JSON
+# Prints, for every synthetic payment in SCENARIOS (sample-data/scenarios.json), the expected outcome next to the
+# state of its P2 process instance, then a one-line verdict. The expected outcome is the last scheme status the
+# scenario reports: ACSC settles and RJCT rejects (both end COMPLETED), PDNG waits for an ops decision (ACTIVE).
+# VARIABLES_JSON and INSTANCES_JSON are Camunda v2 search responses for the paymentId variable and for the
+# pay-instant-exception instances. Returns 0 when every payment is as expected, 1 otherwise.
+payments_table() {
+  local scenarios=$1 vars=$2 insts=$3 id last expected want key state verdict total=0 bad=0
+  printf '%-20s %-34s %-12s %s\n' PAYMENT EXPECTED ACTUAL CHECK
+  while read -r id last; do
+    case "$last" in
+      ACSC) expected="settled (COMPLETED)";               want=COMPLETED ;;
+      RJCT) expected="rejected (COMPLETED)";              want=COMPLETED ;;
+      PDNG) expected="waits for an ops decision (ACTIVE)"; want=ACTIVE ;;
+      *)    expected="unknown scheme status $last";        want="" ;;
+    esac
+    # The variable's processInstanceKey, then that instance's state.
+    key=$(printf '%s' "$vars" | tr '{' '\n' | grep -F "\"value\":\"\\\"$id\\\"\"" \
+      | sed -n 's/.*"processInstanceKey":"\{0,1\}\([0-9][0-9]*\).*/\1/p' | head -1 || true)
+    state=""
+    if [ -n "$key" ]; then
+      state=$(printf '%s' "$insts" | tr '{' '\n' | grep "\"processInstanceKey\":\"\{0,1\}$key\"\{0,1\}[,}]" \
+        | sed -n 's/.*"state":"\([A-Z_]*\)".*/\1/p' | head -1 || true)
+    fi
+    if [ -z "$state" ]; then verdict=MISSING
+    elif [ "$state" = "$want" ]; then verdict=OK
+    else verdict=WRONG; fi
+    total=$((total + 1))
+    [ "$verdict" = OK ] || bad=$((bad + 1))
+    printf '%-20s %-34s %-12s %s\n' "$id" "$expected" "${state:-not found}" "$verdict"
+  done < <(sed -n 's/^ *"\(demo-[a-z0-9-]*\)": *\[.*"\([A-Z]*\)" *\].*/\1 \2/p' "$scenarios")
+  if [ "$total" -eq 0 ]; then
+    warn "no payments found in $scenarios"
+    return 1
+  elif [ "$bad" -eq 0 ]; then
+    info "all $total payments as expected"
+  else
+    warn "$bad of $total payments not as expected (MISSING: no process instance; WRONG: another state)"
+    return 1
+  fi
+}
