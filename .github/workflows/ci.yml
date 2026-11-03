@@ -1,5 +1,5 @@
 name: ci
-# Lint only; nothing here reaches a cluster. Never set the CI_RUNNER variable if this repository is made public:
+# Lint and a Helm render of the pinned chart; nothing here reaches a cluster. Never set the CI_RUNNER variable if this repository is made public:
 # fork pull requests would then run on that self-hosted machine.
 on:
   pull_request:
@@ -20,22 +20,59 @@ jobs:
           shellcheck -s sh sample-data/load.sh
       - name: Manifests are valid YAML
         run: python3 -c 'import sys,yaml; [list(yaml.safe_load_all(open(f))) for f in sys.argv[1:]]' k8s/*.yaml helm/*.yaml
-      - name: Helm v3.16.3 (pinned per architecture; the self-hosted VM does not ship it)
+
+  helm:
+    # The pinned chart rendered with the demo values by two Helm releases: the oldest install.sh accepts, so the floor
+    # it states is tested, and the current 4.x, which is what a fresh `brew install helm` gives the presenter.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - role: floor
+            version: v3.19.5
+            sha_amd64: a0a5e8c592ed3f376ac110715eff214730c7422f9a44d96cf98117d2b8b0e6c0
+            sha_arm64: ce02147ffee6d993bf8ae97a44a22e9e1daf0b69d2d5b69a0c8cf6706445ccf5
+          - role: current
+            version: v4.3.1
+            sha_amd64: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
+            sha_arm64: 8cf8f66ecbc252ac8f7f06cca68aba88508ddfde3a6a34feb1678ad1694b4f88
+    name: helm ${{ matrix.version }} (${{ matrix.role }})
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - name: Helm ${{ matrix.version }} (pinned by sha256 per architecture; the self-hosted VM does not ship it)
+        env:
+          VERSION: ${{ matrix.version }}
+          SHA_AMD64: ${{ matrix.sha_amd64 }}
+          SHA_ARM64: ${{ matrix.sha_arm64 }}
         run: |
           case "$(uname -m)" in
-            x86_64)  arch=amd64; sha=f5355c79190951eed23c5432a3b920e071f4c00a64f75e077de0dd4cb7b294ea ;;
-            aarch64|arm64) arch=arm64; sha=5bd34ed774df6914b323ff84a0a156ea6ff2ba1eaf0113962fa773f3f9def798 ;;
+            x86_64)  arch=amd64; sha=$SHA_AMD64 ;;
+            aarch64|arm64) arch=arm64; sha=$SHA_ARM64 ;;
             *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
           esac
-          f="helm-v3.16.3-linux-$arch.tar.gz"
+          f="helm-$VERSION-linux-$arch.tar.gz"
           curl -sSfL -o "$RUNNER_TEMP/$f" "https://get.helm.sh/$f"
           echo "$sha  $RUNNER_TEMP/$f" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/helm-bin"
           tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/helm-bin" --strip-components=1 "linux-$arch/helm"
           echo "$RUNNER_TEMP/helm-bin" >> "$GITHUB_PATH"
+      - name: install.sh accepts this Helm, and the floor job tests exactly the floor install.sh states
+        env:
+          ROLE: ${{ matrix.role }}
+        run: |
+          floor=$(sed -nE 's/.*die "helm ([0-9]+\.[0-9]+)\+ .*/\1/p' install.sh)
+          [ -n "$floor" ] || { echo "install.sh no longer states its Helm floor as 'helm X.Y+'" >&2; exit 1; }
+          have=$(helm version --short | sed -E 's/^v([0-9]+\.[0-9]+).*/\1/')
+          echo "install.sh requires helm $floor+, this job runs $(helm version --short)"
+          [ "$(printf '%s\n%s\n' "$floor" "$have" | sort -V | head -n1)" = "$floor" ] || { echo "install.sh would refuse helm $have" >&2; exit 1; }
+          if [ "$ROLE" = floor ] && [ "$have" != "$floor" ]; then echo "the floor job runs $have but install.sh's floor is $floor; move one of them" >&2; exit 1; fi
       - name: Pinned chart matches its sha256 and renders with the demo values
         run: |
           url=$(sed -n 's/^url: //p' helm/chart-lock.yaml); sha=$(sed -n 's/^sha256: //p' helm/chart-lock.yaml)
-          curl -sSfL -o chart.tgz "$url"
-          echo "$sha  chart.tgz" | sha256sum -c -
-          helm template camunda chart.tgz -n bpo-demo-ms -f helm/values-camunda.yaml > /dev/null
+          curl -sSfL -o "$RUNNER_TEMP/chart.tgz" "$url"
+          echo "$sha  $RUNNER_TEMP/chart.tgz" | sha256sum -c -
+          helm template camunda "$RUNNER_TEMP/chart.tgz" -n bpo-demo-ms -f helm/values-camunda.yaml > /dev/null
