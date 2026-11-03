@@ -23,8 +23,9 @@ jobs:
 
   helm:
     # The pinned chart rendered with the demo values by two Helm releases: the oldest install.sh accepts, so the floor
-    # it states is tested, and the current 4.x, which is what a fresh `brew install helm` gives the presenter.
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    # it states is tested, and the current 4.x, which is what a fresh `brew install helm` gives the presenter. Pull
+    # requests run on GitHub-hosted runners; only pushes to main use the self-hosted machine vars.CI_RUNNER names.
+    runs-on: ${{ (github.event_name == 'push' && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
