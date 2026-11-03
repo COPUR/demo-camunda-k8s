@@ -74,6 +74,8 @@ olarak bildirir.
 
 ## Mimari (UML)
 
+Bu mimarinin arkasındaki kararlar ve gerekçeleri: [Mimari karar kayıtları](docs/adr/README.md).
+
 ### Bileşen diyagramı
 
 ```mermaid
