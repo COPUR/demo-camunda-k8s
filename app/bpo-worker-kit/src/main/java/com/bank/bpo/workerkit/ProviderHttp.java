@@ -25,8 +25,10 @@ public final class ProviderHttp {
 
     private final URI baseUrl;
     private final Supplier<String> token;
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(3);
+
     private final Duration timeout;
-    private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+    private final HttpClient client = HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build();
     private final JsonMapper json = JsonMapper.builder().build();
 
     private ProviderHttp(URI baseUrl, Supplier<String> token, Duration timeout) {
@@ -91,7 +93,10 @@ public final class ProviderHttp {
     private Map<String, Object> send(HttpRequest request) {
         HttpResponse<String> response;
         try {
-            response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            // bounded body included: a provider that sends headers and then stalls must not hold the job thread
+            response = BoundedExchange.send(client, request, CONNECT_TIMEOUT.plus(timeout));
+        } catch (BoundedExchange.Timeout e) {
+            throw new ProviderException(ProviderException.Kind.TRANSIENT, "TIMEOUT", request.uri().getPath() + " did not answer in time", e);
         } catch (IOException e) {
             throw new ProviderException(ProviderException.Kind.TRANSIENT, "UNREACHABLE", request.uri().getPath() + " not reachable", e);
         } catch (InterruptedException e) {

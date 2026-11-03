@@ -24,3 +24,17 @@ bpo:
 # The engine address and auth come from the environment (CAMUNDA_CLIENT_MODE, CAMUNDA_CLIENT_REST_ADDRESS,
 # CAMUNDA_CLIENT_GRPC_ADDRESS, CAMUNDA_CLIENT_AUTH_*); the chart sets them. The worker runs only in the cluster of
 # the jurisdiction it serves (C8-K4); the TR deployment is the one that reaches psg-tr.
+camunda:
+  client:
+    # The client's default is one thread for every job type: one call that never returned stopped all seven job
+    # types until the pod was restarted. Eight threads, and no more jobs held than there are threads, so a job
+    # nobody can start yet stays with the engine for another worker instead of waiting in this pod's queue.
+    execution-threads: 8
+    worker:
+      defaults:
+        max-jobs-active: 8
+        # A provider call ends within 8 s (3 s connect + 5 s request), so a job not finished in a minute belongs to
+        # a worker that is gone; the engine hands it out again after PT1M instead of the default PT5M.
+        timeout: PT1M
+        # A lease token per activation: a late complete or fail from a superseded activation is refused.
+        with-lease: true

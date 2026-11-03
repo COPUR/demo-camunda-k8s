@@ -156,4 +156,16 @@ class ProviderHttpTest {
         assertThat(sim.calls().get(0).interactionId()).isEqualTo(sim.calls().get(1).interactionId()).isEqualTo(Interaction.idFor("a1"));
         assertThat(sim.calls().get(2).interactionId()).isNotEqualTo(sim.calls().get(0).interactionId());
     }
+
+    @Test
+    void aProviderThatStopsInTheMiddleOfTheBodyIsTransientWithinTheTimeout() {
+        try (StalledServer provider = StalledServer.start(StalledServer.Mode.HEADERS_ONLY)) {
+            ProviderHttp stalled = ProviderHttp.loopback(provider.uri("/"), () -> "t", Duration.ofMillis(500));
+            // the deadline is the 3 s connect timeout plus the request timeout
+            ProviderException failure = org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> org.assertj.core.api.Assertions.catchThrowableOfType(ProviderException.class, () -> stalled.get("/api/v1/x")));
+            assertThat(failure.kind()).isEqualTo(ProviderException.Kind.TRANSIENT);
+            assertThat(failure.code()).isEqualTo("TIMEOUT");
+        }
+    }
 }
