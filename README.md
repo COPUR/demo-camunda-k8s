@@ -326,6 +326,18 @@ Beklenen: **9 örnek; 4 yerleşti, 2 reddedildi, 3 Tasklist'te karar bekliyor.**
 `Msg_SchemeStatusReported` mesajını üç kez yayımlar (olay köprüsünün yapacağı gibi); böylece demo gerçek
 zamanlayıcıları beklemez.
 
+Her örnek, ödeme kimliğini **business ID** olarak ve senaryoyu tag olarak (`demo`, `scenario:unres`,
+`jurisdiction:TR`, `rail:FAST`) taşır. Operate'te *More Filters → Business ID* `demo-tr-unres-001` araması tek P2
+örneği bulur; motor business ID'yi çağrılan `lib-await-external-status` örneğine de verdiği için listede onun durum
+okumaları da yanında görünür. Tag'ler Operate'te görünmez, yalnızca API aramasında kullanılır. Yükleyici yeniden
+çalışırsa (ikinci `./demo.sh up`) örneği olan ödemeyi atlar, ikinci bir vaka açmaz.
+
+**Tasklist formları** karar için gereken bağlamı salt okunur gösterir: istisna kodu (`EXC-001` durum hâlâ
+belirsiz, `EXC-002` beklenmeyen durum, `EXC-003` operasyon yükseltti, `EXC-004` operasyon SLA'sı doldu), FAST'in
+son cevabı ve okuma sayısı, ray, kuyruk, SLA (görevin due date'i) ve adım adım runbook. Runbook ödemeyi Operate'te
+Business ID ile açtırır. Karar ve yükseltme için neden enum olarak seçilir (`decisionReason`, `escalationReason`);
+serbest metin alanı yoktur, böylece forma kişisel veri yazılamaz.
+
 **Camunda yalnızca süreç durumunu tutar:** kimlik, enum, zaman damgası. Tutar, IBAN, isim veya iş kuralı sürece
 girmez; `OutputVariables` bunları çalışma anında reddeder.
 
@@ -334,10 +346,11 @@ girmez; `OutputVariables` bunları çalışma anında reddeder.
 ## Demo senaryosu
 
 1. **Operate:** `pay-instant-exception`, 9 örnek. Yerleşmiş bir örneği açın: yol `Task_CaptureHold` üzerinden
-   geçer, değişkenler yalnızca kimlik ve enum.
+   geçer, değişkenler yalnızca kimlik ve enum. *More Filters → Business ID* ile tek bir ödemeyi bulun.
 2. **Operate, bekleme durumları (8.10):** bekleyen örneklerde sürecin neyi beklediği görünür.
-3. **Tasklist:** belirsiz kalan üç ödeme. Birini yerleştirin, birini reddedin, birini süpervizöre yükseltip
-   orada kapatın.
+3. **Tasklist:** belirsiz kalan üç ödeme. Formdaki bağlamı ve runbook'u okuyun; birini yerleştirin, birini
+   reddedin (neden seçerek), birini nedeniyle süpervizöre yükseltip orada kapatın. Süpervizör formu yükseltmenin
+   kodunu ve nedenini gösterir.
 4. **Hub:** P2 modeli, `lib-await-external-status` ve iki DMN.
 5. **Güvenlik:** `kubectl -n bpo-demo-ms logs deploy/sim-psg-tr` kabul edilen audience'ı ve çağrı sayısını
    gösterir; geçerli token'ı olmayan çağrı 401 veya 403 alır.
@@ -351,6 +364,7 @@ girmez; `OutputVariables` bunları çalışma anında reddeder.
 | k3s (Linux sandbox, `DEMO_CLUSTER=current`, `DEMO_IMAGE_LOAD` ile) | `./install.sh` baştan sona çalıştı; 14 pod çalışıyor, doğrulama 4 bloke tahsilini gördü |
 | Docker Desktop, kind modu (macOS) | Temiz klondan `./install.sh` baştan sona çalıştı (çıkış kodu 0); 12 pod çalışıyor, doğrulama 4 bloke tahsilini gördü |
 | Docker Desktop kubeadm modu, OrbStack, Rancher Desktop, minikube | Denenmedi |
+| `models/e2e/run.sh` (yalnızca Docker, küme yok) | Modeller ve `load.sh` sabitlenmiş Camunda 8.10.4 imajına karşı: business ID ve tag'ler, ikinci yüklemede yeni örnek yok, görevlerde bağlam ve due date, yükseltme ve karar nedenleri, nedensiz karar (API'nin çağrısı) olaysız, tüm değişkenlerde PII denetimi |
 
 Süreler yaklaşıktır ve ağa, makineye göre değişir.
 
@@ -428,6 +442,7 @@ helm/                  values-camunda.yaml, chart-lock.yaml (camunda-platform 15
 k8s/                   00 namespace · 10 postgres · 20 keycloak · 30 keycloak istemcileri
                        40 simülatörler + worker · 50 network policy · 60 yükleyici Job
 models/                P2 BPMN, L3 kütüphane süreci, 2 DMN, 2 form
+  e2e/run.sh           modeller ve yükleyici için gerçek motor testi (Docker)
 sample-data/           scenarios.json (9 sentetik ödeme), load.sh
 app/                   Gradle çok modüllü uygulama ve çok aşamalı Dockerfile
   bpo-worker-kit/      idempotency anahtarları, çıktı korkuluğu, sağlayıcı HTTP, hata eşleme
@@ -454,3 +469,10 @@ Bunlar bilinçli demo kısayollarıdır.
 Kaynak: `COPUR/neo-fintechbankx-bpo-process-orchestration` commit `b8c4f50` (`demo/microservices`). Bu
 depoda eklenenler: sağlayıcı başına worker kapsamları (`BPO_AUTH_SCOPE_*`), kind modu imaj aktarımı, Docker
 içinde derleme (hostta JDK gerekmez), kurulum sonrası doğrulama ve `status.sh`.
+
+**Modellerde kaynaktan sapma.** `models/pay-instant-exception.bpmn` ve iki form `b8c4f50`'dekinden farklıdır; fark
+yalnızca Tasklist ve Operate deneyimi içindir. Görevlere salt okunur bağlam değişkenleri (`exceptionCode`,
+`lastSchemeStatus`, `schemeStatusReads`, `escalationCode`, `escalationReason`) ve enum `decisionReason` eklendi;
+formlar demoda olmayan "payments operations view" yerine Operate'i gösterir. Eleman kimlikleri, akış koşulları ve
+pay'e giden karar (`exceptionDecision`) aynıdır; worker'lar yeni değişkenleri okumaz. Kaynak depoya taşınacaksa
+bu değişiklik oraya ayrıca önerilmelidir.
