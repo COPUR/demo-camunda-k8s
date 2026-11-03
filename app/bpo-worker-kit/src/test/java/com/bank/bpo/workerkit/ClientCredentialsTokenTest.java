@@ -8,6 +8,12 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 class ClientCredentialsTokenTest {
@@ -107,6 +113,71 @@ class ClientCredentialsTokenTest {
             org.assertj.core.api.Assertions.assertThatThrownBy(token::get).isInstanceOfSatisfying(ProviderException.class,
                 (e) -> assertThat(e.kind()).isEqualTo(ProviderException.Kind.CONTRACT));
             assertThat(token.get()).isEqualTo("token-1");
+        }
+    }
+
+    // ---- T1: a token endpoint that accepts and never answers stalled every job type ----
+
+    @Test
+    void aSilentTokenEndpointFailsTransientlyWithinFiveSeconds() {
+        try (StalledServer keycloak = StalledServer.start(StalledServer.Mode.SILENT)) {
+            ClientCredentialsToken token = new ClientCredentialsToken(keycloak.uri("/token"), "c", "x", "s", Clock.systemUTC());
+            long started = System.nanoTime();
+            ProviderException failure = org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(Duration.ofSeconds(7),
+                () -> org.assertj.core.api.Assertions.catchThrowableOfType(ProviderException.class, token::get));
+            assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofMillis(5_900));
+            assertThat(failure.kind()).isEqualTo(ProviderException.Kind.TRANSIENT);
+            assertThat(failure.code()).isEqualTo("TOKEN_TIMEOUT");
+        }
+    }
+
+    @Test
+    void aTokenAnswerThatStopsInTheMiddleOfTheBodyFailsToo() {
+        try (StalledServer keycloak = StalledServer.start(StalledServer.Mode.HEADERS_ONLY)) {
+            ClientCredentialsToken token = new ClientCredentialsToken(keycloak.uri("/token"), "c", "x", "s", Clock.systemUTC(),
+                Duration.ofMillis(300), Duration.ofMillis(500));
+            ProviderException failure = org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(Duration.ofSeconds(3),
+                () -> org.assertj.core.api.Assertions.catchThrowableOfType(ProviderException.class, token::get));
+            assertThat(failure.kind()).isEqualTo(ProviderException.Kind.TRANSIENT);
+            assertThat(failure.code()).isEqualTo("TOKEN_TIMEOUT");
+        }
+    }
+
+    @Test
+    void aTokenThatTimedOutIsFetchedAgainOnTheNextCall() {
+        try (StalledServer keycloak = StalledServer.start(StalledServer.Mode.SILENT)) {
+            ClientCredentialsToken token = new ClientCredentialsToken(keycloak.uri("/token"), "c", "x", "s", Clock.systemUTC(),
+                Duration.ofMillis(300), Duration.ofMillis(300));
+            for (int attempt = 0; attempt < 2; attempt++) {
+                org.assertj.core.api.Assertions.assertThatThrownBy(token::get).isInstanceOfSatisfying(ProviderException.class,
+                    (e) -> assertThat(e.code()).isEqualTo("TOKEN_TIMEOUT"));
+            }
+        }
+    }
+
+    @Test
+    void otherJobTypesProgressWhileOneProvidersTokenEndpointHangs() throws Exception {
+        ExecutorService jobThreads = Executors.newFixedThreadPool(8); // camunda.client.execution-threads
+        try (DomainSimulator sim = DomainSimulator.start(); StalledServer keycloak = StalledServer.start(StalledServer.Mode.SILENT)) {
+            sim.kyc("a1", "PENDING");
+            ClientCredentialsToken stuck = new ClientCredentialsToken(keycloak.uri("/token"), "c", "x", "aud-acc", Clock.systemUTC());
+            ClientCredentialsToken healthy = new ClientCredentialsToken(sim.baseUrl().resolve("/token"), "c", "x", "aud-psg", Clock.systemUTC());
+            ProviderHttp acc = ProviderHttp.loopback(sim.baseUrl(), stuck, Duration.ofSeconds(5));
+            ProviderHttp psg = ProviderHttp.loopback(sim.baseUrl(), healthy, Duration.ofSeconds(5));
+
+            Future<?> hung = jobThreads.submit(() -> acc.get("/api/v1/applications/a1/kyc"));
+            List<Future<?>> others = new ArrayList<>();
+            for (int i = 0; i < 3; i++) {
+                others.add(jobThreads.submit(() -> psg.get("/api/v1/applications/a1/kyc")));
+            }
+            for (Future<?> other : others) {
+                other.get(2, TimeUnit.SECONDS);
+            }
+            assertThat(hung.isDone()).as("the stalled call is still waiting while the others finished").isFalse();
+            assertThat(org.assertj.core.api.Assertions.catchThrowable(() -> hung.get(6, TimeUnit.SECONDS)))
+                .hasCauseInstanceOf(ProviderException.class);
+        } finally {
+            jobThreads.shutdownNow();
         }
     }
 }

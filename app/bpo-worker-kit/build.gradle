@@ -8,3 +8,21 @@ dependencies {
 dependencies {
     testImplementation project(':domain-simulator')
 }
+
+// T1 acceptance: the kit carries the timeouts every worker relies on, so its tests must cover it.
+apply plugin: 'jacoco'
+
+tasks.named('test') { finalizedBy 'jacocoTestReport' }
+tasks.named('jacocoTestReport') {
+    dependsOn 'test'
+    reports { xml.required = true }
+}
+tasks.named('jacocoTestCoverageVerification') {
+    violationRules {
+        rule {
+            limit { counter = 'LINE'; minimum = 0.87 }
+            limit { counter = 'BRANCH'; minimum = 0.87 }
+        }
+    }
+}
+tasks.named('check') { dependsOn 'jacocoTestCoverageVerification' }

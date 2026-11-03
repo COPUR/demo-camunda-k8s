@@ -29,7 +29,25 @@ class JobErrorsTest {
     void aTransientFailureFailsTheJobSoTheEngineRetriesIt() {
         assertThatThrownBy(() -> JobErrors.guard(() -> {
             throw failure(ProviderException.Kind.TRANSIENT, "UNAVAILABLE");
-        })).isInstanceOf(ProviderException.class);
+        })).isInstanceOfSatisfying(JobError.class, (e) -> {
+            assertThat(e.getRetries()).as("null: the engine's count minus one").isNull();
+            assertThat(e.getErrorMessage()).contains("TRANSIENT").contains("UNAVAILABLE");
+            assertThat(e.getCause()).isInstanceOf(ProviderException.class);
+        });
+    }
+
+    @Test
+    void theRetriesBackOffExponentiallyUpToACap() {
+        JobError error = org.assertj.core.api.Assertions.catchThrowableOfType(JobError.class, () -> JobErrors.guard(() -> {
+            throw failure(ProviderException.Kind.TRANSIENT, "TOKEN_TIMEOUT");
+        }));
+        // the model gives each task retries="5": 4 retries left after the first failure, then 3, 2, 1
+        assertThat(error.getRetryBackoff().apply(4)).isEqualTo(java.time.Duration.ofSeconds(2));
+        assertThat(error.getRetryBackoff().apply(3)).isEqualTo(java.time.Duration.ofSeconds(4));
+        assertThat(error.getRetryBackoff().apply(2)).isEqualTo(java.time.Duration.ofSeconds(8));
+        assertThat(error.getRetryBackoff().apply(1)).isEqualTo(java.time.Duration.ofSeconds(16));
+        assertThat(JobErrors.retryBackoff(-20)).isEqualTo(java.time.Duration.ofSeconds(60));
+        assertThat(JobErrors.retryBackoff(9)).as("more retries than the model gives").isEqualTo(java.time.Duration.ofSeconds(2));
     }
 
     @Test
