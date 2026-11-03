@@ -380,7 +380,7 @@ Süreler yaklaşıktır ve ağa, makineye göre değişir.
 | `./demo.sh up\|open\|login\|status\|down` | Tek giriş noktası: aşağıdaki betikleri çağırır; `login` presenter şifresini ekrana yazmadan panoya kopyalar |
 | `./install.sh` | Kurar veya günceller (tekrar çalıştırılabilir) |
 | `./open.sh` | Arayüzleri 127.0.0.1'de yayınlar; kopan bağlantıyı yeniden kurar, port doluysa başlamadan hata verir; Ctrl-C ile kapanır |
-| `./status.sh` | Pod'lar, yükleyici sonucu, simülatör sayaçları, worker uyarıları |
+| `./status.sh` | Pod'lar, yükleyici sonucu, simülatör sayaçları, worker uyarıları, 9 ödeme için beklenen ve gerçek durum tablosu |
 | `./uninstall.sh` | Helm sürümünü ve namespace'i siler (veri ve Secret'lar dahil) |
 
 | Ortam değişkeni | Varsayılan | Anlamı |
