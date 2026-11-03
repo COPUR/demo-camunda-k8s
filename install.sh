@@ -103,18 +103,21 @@ if secret_exists demo-tls-ca && { [ "$tls_missing" = true ] \
     || ! kubectl -n "$NS" get secret demo-tls-ca -o jsonpath='{.data.ca\.crt}' | base64 -d \
     | openssl x509 -noout -checkend 86400 >/dev/null 2>&1; }; then
   info "demo CA expires within a day or a server has no certificate yet; renewing the CA and every server certificate"
-  kubectl -n "$NS" delete secret demo-tls-ca "${tls_servers[@]/#/demo-tls-}" --ignore-not-found >/dev/null
-  tls_renewed=true
+  kubectl -n "$NS" delete secret demo-tls-ca --ignore-not-found >/dev/null
 fi
 if ! secret_exists demo-tls-ca; then
   info "demo CA and server certificates"
+  # A new CA voids every server certificate, also those a run that stopped half way left behind, and a running
+  # Keycloak keeps serving its old one until it is restarted further down.
+  kubectl -n "$NS" delete secret "${tls_servers[@]/#/demo-tls-}" --ignore-not-found >/dev/null
+  if kubectl -n "$NS" get deployment keycloak >/dev/null 2>&1; then tls_renewed=true; fi
   work="$DEMO_TMP/tls"; mkdir -m 700 "$work"
   printf '[req]\ndistinguished_name=dn\n[dn]\n[ca]\nbasicConstraints=critical,CA:true\nkeyUsage=critical,keyCertSign,cRLSign\n' > "$work/ca.cnf"
   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/ca.key" 2>/dev/null
   openssl req -x509 -new -key "$work/ca.key" -subj "/CN=bpo-demo-ms local CA" -days 7 -config "$work/ca.cnf" -extensions ca -out "$work/ca.crt"
   # A truststore with an unprotected certificate entry and no MAC, so the JVMs read it without a password.
   # The throwaway store password travels in the environment (docker run -e NAME copies it), never on an argv.
-  DEMO_STOREPASS=$(random) docker run --rm --user "$(id -u):$(id -g)" -v "$work":/w -e DEMO_STOREPASS --entrypoint keytool "$IMAGE" \
+  DEMO_STOREPASS=$(openssl rand -hex 24) docker run --rm --user "$(id -u):$(id -g)" -v "$work":/w -e DEMO_STOREPASS --entrypoint keytool "$IMAGE" \
     -J-Dkeystore.pkcs12.certProtectionAlgorithm=NONE -J-Dkeystore.pkcs12.macAlgorithm=NONE -importcert -noprompt \
     -alias bpo-demo-ca -file /w/ca.crt -keystore /w/truststore.p12 -storetype PKCS12 -storepass:env DEMO_STOREPASS >/dev/null
   kubectl -n "$NS" create secret generic demo-tls-ca --from-file=ca.crt="$work/ca.crt" --from-file=truststore.p12="$work/truststore.p12" >/dev/null
