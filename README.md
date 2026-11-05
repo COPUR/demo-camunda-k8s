@@ -359,6 +359,7 @@ taşıdığını göstermektir; P2'den bağımsızdır, ek worker ya da simülat
 | İdempotent başlatma | Business id tekilliği (`businessId = applicationId`) | Yükleyici aynı başvuruyu ikinci kez başlatamaz (409) |
 | Kural ve insan kararı | Business rule task (DMN), Camunda user task + form | `Task_ScoreApplication`, `Task_UnderwriterReview` |
 | Kodsuz adım | FEEL script task | Tüm adımlar ve telafiler |
+| Desenleri modelde göstermek | Metin notları (`[HITL]`, `[No XA]`, `[Resilience]`, `[Compensation]`, `[Multi-cluster]`) | Bkz. [Vurgulanan adımlar](#vurgulanan-adımlar) |
 | Outbox ve relay | Aynı motor işleminde durum + olay; versionTag ile bağlı call activity; sıralı multi-instance; sinyal | `outbox` değişkeni, `Task_RelayCommitted`, `Task_RelayClosing`, `Sig_LoanEventPublished` |
 
 ### Saga akışı
@@ -439,6 +440,87 @@ hakkı) kullanılır.
 ./demo.sh loan sign demo-tr-loan-003        # underwriter onayından sonra müşteri imzalar
 ./demo.sh loan withdraw demo-tr-loan-003    # aktarımdan sonra cayma
 ```
+
+### Vurgulanan adımlar
+
+Modelde her desen bir `[etiket]` notuyla işaretlidir (Hub ve Operate'te görünür). Bu bölüm her etiketin
+modelde nereye karşılık geldiğini, demoda nasıl gösterileceğini ve hedefte neyin değişeceğini anlatır.
+
+#### 1. HITL (insan döngüde)
+
+| Adım | Öğe | Demoda |
+|---|---|---|
+| Kural karar veremezse insana sor | DMN `REFER` → `Task_UnderwriterReview` (Camunda user task, form `loan-underwriter-decision`, aday grup `loan-underwriters`, son tarih) | `demo-tr-loan-003` Tasklist'te bekler; form tutarı, vadeyi, skoru ve DMN gerekçesini gösterir |
+| İnsan cevap vermezse süreç takılmasın | `BoundaryEvent_UnderwriterSla` (PT30M, kesen) → `Event_NoUnderwriterDecision` → ret | 30 dk sonra başvuru gerekçesiyle kapanır |
+| İnsan kararı sonraki adımı belirlesin | `Gateway_UnderwriterDecision`: onay sagaya, ret kayda gider | Onaylayın, sonra `./demo.sh loan sign demo-tr-loan-003` |
+
+Müşterinin e-imzası ve caymasını da insan adımı olarak düşünebilirsiniz. Bunlar Tasklist görevi değildir, dış
+kanaldan gelen mesajlardır (`Msg_LoanContractSigned`, `Msg_LoanWithdrawn`). Kararı süreç verir, insan yalnızca
+istisnada devreye girer.
+
+#### 2. XA yerine saga
+
+XA/2PC, limit, sözleşme ve çekirdek bankacılık sistemlerini tek dağıtık transaction'da kilitler. Bunun için her
+katılımcının XA desteklemesi, koordinatörün ayakta olması ve kilitlerin imza veya cayma gibi dakikalar ile günler
+süren beklemeler boyunca tutulması gerekir. Camunda 8 bir XA koordinatörü değildir ve süreç adımlarını XA'ya
+katmaz. Bu yüzden model iki katmanlıdır:
+
+| Katman | Ne garanti eder | Modelde |
+|---|---|---|
+| Yerel ACID | Bir adımın sonucu ve outbox olayı ya birlikte yazılır ya hiç yazılmaz | Her script task'ın çıktı eşlemesi tek motor komutudur (`[No XA]` notu). Hedefte: servisin kendi veritabanı transaction'ı, iş kaydı ile outbox satırı birlikte |
+| Saga | Adımlar arasında nihai tutarlılık: ya hepsi tamamlanır ya tamamlananlar telafi edilir | `SubProcess_DisbursementSaga` ve telafi işleyicileri |
+
+Bedeli izolasyondur. Saga sürerken başka biri yarım bir durumu görebilir (rezerve edilmiş limit,
+imzalanmamış sözleşme). Bu yüzden ara durumlar açıkça adlandırılır (`RESERVED`, `DRAWN_UP`), pivot adım
+(`Task_Disburse`) en sona konur ve telafisi gerçek bir iş işlemidir (geri tahsil), "silme" değildir.
+
+#### 3. Dayanıklılık (resilience)
+
+| Risk | Önlem | Modelde / demoda |
+|---|---|---|
+| Sonsuz bekleme | Her beklemenin süresi var | İmza `BoundaryEvent_SignatureWindow`, underwriter SLA, cayma `Gateway_WithdrawalWindow` |
+| Aynı başvurunun iki kez başlatılması | Business id tekilliği | `businessId = applicationId`; yükleyici tekrar çalışınca 409 alır ve bunu sorun saymaz |
+| Aynı mesajın iki kez gelmesi | `messageId` ile tekilleştirme (TTL boyunca) | `demo-tr-loan-001`'in imzası iki kez yayımlanır, ikincisi düşer; `./demo.sh loan sign` tekrarında uyarı |
+| Erken gelen mesaj | Mesaj TTL'i (10 dk) korelasyonu bekletir | Cayma mesajı, süreç cayma geçidine varmadan yayımlanır ve yine eşleşir |
+| Relay ile yayın arasında çökme | En az bir kez teslim, belirleyici `eventId`, idempotent tüketici | `lib-outbox-relay` işareti yayından **sonra** ilerletir |
+| Motor çökmesi | Zeebe durumu log ve snapshot'tan kurar, akış kaldığı yerden sürer | Demoda 1 broker; hedefte replikasyon 3 ve çok bölge (aşağıda) |
+| Kalıcı adım hatası | Hedefte job worker retry ve backoff, sonra incident; Operate'te düzeltilip devam edilir | Demoda adımlar script task olduğu için retry yok. Worker'a geçince `retries` ve `retryBackOff` adım başına verilir |
+
+#### 4. Telafi (compensation)
+
+| Durum | Ne telafi edilir | Sıra | Öğe |
+|---|---|---|---|
+| İmza süresi doldu (`demo-tr-loan-004`) | Sözleşme, limit | Ters sıra, tek tek | `SubProcess_SagaRollback`: `Event_UndoDisbursement` → `Event_UndoContract` → `Event_UndoLimit` |
+| Çekirdek aktarımı reddetti (`demo-tr-loan-005`) | Sözleşme, limit | Ters sıra, tek tek | Aynı geri sarma alt süreci |
+| Müşteri caydı (`demo-tr-loan-006`) | Aktarım, sözleşme, limit | Hepsi aynı anda | `Event_CompensateLoan` (süreç düzeyinde, tamamlanmış sagayı kapsar) |
+
+Kurallar (8.10.4'te doğrulandı):
+- Yalnızca **tamamlanmış** adımın işleyicisi çalışır. Hiç çalışmamış aktarım için `Event_UndoDisbursement` bir şey yapmadan geçer.
+- Hata ile kesilen bir alt sürecin işleyicileri dışarıdan çağrılamaz. Bu yüzden geri sarma, saganın **içindeki** hata olay alt sürecidir.
+- Her telafi de kendi outbox olayını yazar (`LimitReleased`, `ContractCancelled`, `DisbursementCollectedBack`), yani dış dünya geri almayı da öğrenir.
+- Telafi işleyicisi kalıcı olarak başarısız olursa saga orada durur (hedefte incident). Bu da bir HITL noktasıdır: operasyon Operate'te düzeltir ve devam ettirir.
+
+#### 5. Çok küme (multi-cluster)
+
+Demo tek küme ve tek brokerdır (`clusterSize: 1`, `replicationFactor: 1`). Model ise çok küme için hazır yazılmıştır:
+
+| Model kararı | Neden çok kümede önemli |
+|---|---|
+| Süreçte bellek içi durum yok, her şey motor kaydında | Bölge kaybında durum diğer bölgedeki replikadan sürer (Camunda belgesine göre dual-region'da RPO 0) |
+| Başlatma `businessId`, mesajlar `messageId` taşır | Trafik bölge değiştirince tekrar eden istek çift örnek veya çift korelasyon üretmez |
+| Olaylar yalnızca outbox relay'den çıkar, `eventId` belirleyicidir | Başka kümelerdeki tüketiciler aynı olayı iki kez alsa da bir kez işler |
+| Kütüphane süreçleri `versionTag` ile bağlı | Bölgeler aynı model sürümünü çalıştırır, sürüm yükseltmesi açık olur |
+
+Hedefte izlenecek adımlar (Camunda 8.10 Dual-Region belgesine göre; bu depoda denenmedi):
+
+1. **Topoloji:** tek bir orkestrasyon kümesi iki bölgeye yayılır. Brokerlar bölgelere eşit dağıtılır, `clusterSize` en az 4 ve çift, `replicationFactor` 4 olur. Bölgeler arası RTT 100 ms civarında tutulur.
+2. **İkincil depolama:** her bölgede ayrı Elasticsearch. Dual-region RDBMS (bu demodaki PostgreSQL) ve OpenSearch ile desteklenmez. RDBMS ile kalmak için ayrı "Multi-Region RDBMS" veya "cold recovery" seçenekleri incelenir.
+3. **Trafik:** v2 API ile iki bölge de aktif. Operate ve Tasklist de aktif-aktiftir (Tasklist V2), bu yüzden underwriter görevi iki bölgeden de görülür.
+4. **Bağlantılar:** inbound connector'lar iki bölgede çalıştığı için idempotent olmalıdır. Bu modelde mesajlar zaten `messageId` taşır.
+5. **Yönetim katmanı:** Hub ve Optimize tek bölgededir ve çok bölge garantisi yoktur. Kimlik sağlayıcı (Keycloak) bölge kaybında token yenilemeyi kesmesin diye ayrıca yedeklenir.
+6. **Failover ve failback:** belgedeki işletim prosedürü adım adım uygulanır (failover RTO 1 dk altı, failback 5 dk artı Elasticsearch geri yükleme). Prosedür dışında trafiği çevirmek tutarsızlık yaratır.
+7. **Yükseltme:** bölgeler tek tek yükseltilir; ikisini birden yükseltmek Zeebe partition çoğunluğunu kaybettirebilir.
+8. **Kümeler arası olaylar:** başka bir Camunda kümesi veya servis, olayları sinyal yerine outbox relay'in yazdığı broker'dan (Kafka/Redpanda) okur ve `eventId` ile tekilleştirir.
 
 P2'den bilinçli bir fark: bu demo, mantık worker olmadan görünsün diye **sentetik** tutarı ve skoru süreç
 değişkeninde tutar. Hedefte adımlar job worker olur ve süreçte P2'deki gibi yalnızca kimlik ve enum kalır.
@@ -575,6 +657,7 @@ Bunlar bilinçli demo kısayollarıdır.
 | Sağlayıcılar simülatör | Yayımlanmış katalog sözleşmeleri (`acc`, `pay`, `psg-tr`, `ntf`) |
 | Connectors ve Hub açık | Kapalı; her dış çağrı sözleşmesi olan bir worker'dan geçer |
 | Kredi sagasının adımları FEEL script task, outbox süreç değişkeninde, broker yerine sinyal | Adımlar job worker; outbox servisin veritabanında, relay Kafka'ya yazar; süreçte yalnızca kimlik ve enum |
+| Tek küme, tek bölge | Dual-region: bir küme iki bölgede, `replicationFactor` 4, bölge başına Elasticsearch (bkz. [Vurgulanan adımlar](#vurgulanan-adımlar)) |
 
 Kaynak: `COPUR/neo-fintechbankx-bpo-process-orchestration` commit `b8c4f50` (`demo/microservices`). Bu
 depoda eklenenler: sağlayıcı başına worker kapsamları (`BPO_AUTH_SCOPE_*`), kind modu imaj aktarımı, Docker
