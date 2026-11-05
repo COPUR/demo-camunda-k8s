@@ -1,0 +1,23 @@
+{
+  "id": "loan-underwriter-decision",
+  "type": "default",
+  "schemaVersion": 16,
+  "components": [
+    {
+      "type": "text",
+      "id": "Field_ApplicationSummary",
+      "text": "Synthetic consumer loan application {{applicationId}}: {{amount}} TRY over {{termMonths}} months, credit score {{creditScore}}. Scoring referred it because: {{creditDecision.reason}}."
+    },
+    {
+      "type": "radio",
+      "id": "Field_UnderwriterDecision",
+      "key": "underwriterDecision",
+      "label": "Decision",
+      "validate": { "required": true },
+      "values": [
+        { "label": "Approve; start the disbursement saga", "value": "APPROVE" },
+        { "label": "Decline", "value": "DECLINE" }
+      ]
+    }
+  ]
+}

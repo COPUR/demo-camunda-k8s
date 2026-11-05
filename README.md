@@ -20,13 +20,14 @@ Yerel ve geçici bir demodur; yalnızca **sentetik veri** kullanır. Hedef üret
 3. [Mimari (UML)](#mimari-uml)
 4. [Kurulum akışı](#kurulum-akışı)
 5. [P2 süreci ve örnek veri](#p2-süreci-ve-örnek-veri)
-6. [Demo senaryosu](#demo-senaryosu)
-7. [Test durumu](#test-durumu)
-8. [Güvenlik modeli](#güvenlik-modeli)
-9. [Komutlar ve ayarlar](#komutlar-ve-ayarlar)
-10. [Sorun giderme](#sorun-giderme)
-11. [Depo yapısı](#depo-yapısı)
-12. [Hedef topolojiden farklar](#hedef-topolojiden-farklar)
+6. [İhtiyaç kredisi: saga ve outbox](#i̇htiyaç-kredisi-saga-ve-outbox)
+7. [Demo senaryosu](#demo-senaryosu)
+8. [Test durumu](#test-durumu)
+9. [Güvenlik modeli](#güvenlik-modeli)
+10. [Komutlar ve ayarlar](#komutlar-ve-ayarlar)
+11. [Sorun giderme](#sorun-giderme)
+12. [Depo yapısı](#depo-yapısı)
+13. [Hedef topolojiden farklar](#hedef-topolojiden-farklar)
 
 ---
 
@@ -331,6 +332,119 @@ girmez; `OutputVariables` bunları çalışma anında reddeder.
 
 ---
 
+## İhtiyaç kredisi: saga ve outbox
+
+`loan-personal-saga`, bir ihtiyaç kredisinin kullandırımını **saga** olarak yürütür ve olaylarını
+**transactional outbox** üzerinden yayımlar. Amaç Camunda 8.10'un bu iki deseni modelin kendisinde nasıl
+taşıdığını göstermektir; P2'den bağımsızdır, ek worker ya da simülatör gerektirmez.
+
+| Model | Ne gösterir |
+|---|---|
+| `loan-personal-saga.bpmn` | Saga: DMN kararı, insan onayı, üç yerel adım ve telafileri, imza bekleme, cayma süresi |
+| `lib-outbox-relay.bpmn` | Outbox relay: henüz yayımlanmamış olayları sırayla yayımlar, sonra işareti ilerletir |
+| `loan-event-consumer.bpmn` | Tüketici: yayımlanan her olay için bir örnek (bildirim veya muhasebe projeksiyonu yerine) |
+| `loan-credit-decision.dmn` | Sentetik kredi politikası: skor, tutar ve taksit/gelir oranına göre APPROVE, REFER, DECLINE |
+| `loan-underwriter-decision.form` | REFER edilen başvuru için Tasklist formu |
+
+### Kullanılan Camunda özellikleri
+
+| Desen ihtiyacı | Camunda 8.10 karşılığı | Modeldeki öğe |
+|---|---|---|
+| Adım başına geri alma | Telafi sınır olayı + `isForCompensation` işleyici | `Task_ReserveLimit` → `Task_ReleaseLimit`, `Task_DrawUpContract` → `Task_CancelContract`, `Task_Disburse` → `Task_CollectBack` |
+| Hata olunca geri sarma | Hata bitiş olayı + hata ile başlayan olay alt süreci | `EndEvent_SignatureExpired`, `EndEvent_DisbursementRejected` → `SubProcess_SagaRollback` |
+| Ters sırada telafi | `activityRef` ile sırayla telafi fırlatma | `Event_UndoDisbursement` → `Event_UndoContract` → `Event_UndoLimit` |
+| Tamamlanmış sagayı toptan geri alma | Süreç düzeyinde telafi (tamamlanmış alt sürecin içindeki işleyiciler de çalışır) | `Event_CompensateLoan` (cayma) |
+| Dış olay bekleme, tekrar eden mesaj | Mesaj korelasyonu (`applicationId`), `messageId` ile tekrar eden mesajın düşürülmesi | `Task_AwaitSignature`, `Event_LoanWithdrawn` |
+| Zaman aşımı | Sınır zamanlayıcısı, olay tabanlı geçit | `BoundaryEvent_SignatureWindow`, `Gateway_WithdrawalWindow`, `BoundaryEvent_UnderwriterSla` |
+| İdempotent başlatma | Business id tekilliği (`businessId = applicationId`) | Yükleyici aynı başvuruyu ikinci kez başlatamaz (409) |
+| Kural ve insan kararı | Business rule task (DMN), Camunda user task + form | `Task_ScoreApplication`, `Task_UnderwriterReview` |
+| Kodsuz adım | FEEL script task | Tüm adımlar ve telafiler |
+| Outbox ve relay | Aynı motor işleminde durum + olay; versionTag ile bağlı call activity; sıralı multi-instance; sinyal | `outbox` değişkeni, `Task_RelayCommitted`, `Task_RelayClosing`, `Sig_LoanEventPublished` |
+
+### Saga akışı
+
+```mermaid
+flowchart LR
+  A([Başvuru]) --> D{DMN kararı}
+  D -- DECLINE --> R1[Reddi kaydet]
+  D -- REFER --> U[Tasklist: underwriter] -- onay --> S
+  U -- ret veya SLA --> R1
+  D -- APPROVE --> S
+  subgraph S[Kullandırım sagası]
+    direction LR
+    L[Limiti rezerve et] --> C[Sözleşmeyi hazırla] --> E[E-imza bekle] --> K{Çekirdek kabul?} -- evet --> T[Hesaba aktar]
+    L -.telafi.-> L2[Rezervi bırak]
+    C -.telafi.-> C2[Sözleşmeyi iptal et]
+    T -.telafi.-> T2[Geri tahsil et]
+    E -- süre doldu --> X((Err_SignatureTimeout))
+    K -- hayır --> Y((Err_DisbursementRejected))
+  end
+  X & Y --> G[Geri sarma: aktarım, sözleşme, limit sırasıyla telafi] --> RB[ROLLED_BACK]
+  S -- COMMITTED --> O1[Outbox relay] --> W{Cayma süresi}
+  W -- Msg_LoanWithdrawn --> CW[Tüm sagayı telafi et] --> WD[WITHDRAWN]
+  W -- süre bitti --> AC[ACTIVE]
+  R1 & RB & WD & AC --> O2[Outbox relay] --> Z([Kapandı])
+```
+
+Saga **orkestrasyonla** yürür: hangi adımın telafi edileceğini sürecin kendisi bilir, adımlar birbirini
+tanımaz. Yalnızca **tamamlanmış** adımlar telafi edilir; aktarım hiç yapılmadıysa `Event_UndoDisbursement`
+hiçbir şey yapmadan geçer. Çekirdek bankacılığın cevabı demoda örnek veriden gelir (`coreBankingAnswer`); gerçek
+bir job worker'da bu, aktarım görevinin fırlattığı BPMN hatası olur.
+
+### Outbox: çift yazma yok
+
+Klasik sorun: bir servis veritabanına yazar, sonra olayı broker'a gönderir; ikisinin arasında çökerse ya olay
+kaybolur ya da yazılmamış bir değişikliğin olayı gider. Burada her adım, **alan sonucunu ve olayını aynı motor
+komutunda** yazar (script sonucu ve `outbox = append(outbox, …)` aynı çıktı eşlemesinde). Zeebe bu kaydı tek
+seferde kalıcılaştırır; ya ikisi birden olur ya hiçbiri.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant S as loan-personal-saga
+  participant R as lib-outbox-relay
+  participant B as Sinyal (broker yerine)
+  participant K as loan-event-consumer
+  S->>S: Hesaba aktar: disbursement + outbox[LoanDisbursed] (tek commit)
+  S->>R: call activity: events = outbox[outboxRelayed+1 ..], relayedFrom
+  loop her bekleyen olay, sırayla
+    R->>B: Sig_LoanEventPublished (eventId = applicationId:type)
+    B-->>K: yeni örnek, eventId ile
+  end
+  R-->>S: relayedUpTo → outboxRelayed (işaret ilerler)
+  Note over R,K: Yayımla ile işaret arasında çökme olursa tekrar yayımlanır: en az bir kez.<br/>Tüketici eventId'yi saklayıp tekrarı düşürür (idempotent tüketici).
+```
+
+Relay iki noktada çağrılır: saga commit olduktan hemen sonra (cayma süresi beklenmeden) ve başvuru kapanırken.
+Hedef sistemde sinyalin yerini Kafka (Redpanda) gibi bir broker'a yazan bir worker veya connector alır; outbox
+de servisin kendi veritabanında, iş kaydıyla aynı transaction'da tutulur.
+
+### Örnek veri (`sample-data/loans.json`)
+
+| Başvuru | Ne olur | Sonuç (`loanOutcome`) | Outbox |
+|---|---|---|---|
+| `demo-tr-loan-001` | Onay, imza, aktarım; 3 dk cayma süresi geçer. İmza mesajı iki kez yayımlanır, ikincisi `messageId` ile düşer | `ACTIVE` | 4 olay |
+| `demo-tr-loan-002` | Skor 950: DMN reddeder, saga hiç başlamaz | `DECLINED` | 1 olay |
+| `demo-tr-loan-003` | Skor 1250: REFER, Tasklist'te underwriter kararı bekler | (bekliyor) | 0 olay |
+| `demo-tr-loan-004` | İmza gelmez, 1 dk sonra pencere kapanır: sözleşme ve limit ters sırada telafi edilir | `ROLLED_BACK` | 6 olay |
+| `demo-tr-loan-005` | İmzalanır, çekirdek bankacılık aktarımı reddeder: sözleşme ve limit telafi edilir | `ROLLED_BACK` | 6 olay |
+| `demo-tr-loan-006` | Aktarımdan sonra cayma: üç adım birden telafi edilir, para geri tahsil edilir | `WITHDRAWN` | 7 olay |
+
+Beklenen: **6 başvuru; 1 aktif, 1 ret, 2 geri sarılmış, 1 cayma, 1 Tasklist'te.** Süreler demo için kısadır
+(`signatureTimeout`, `withdrawalPeriod`); başlangıçta verilmezse P2D ve P14D (tüketici kredisinde 14 günlük cayma
+hakkı) kullanılır.
+
+```bash
+./demo.sh loan                              # 6 başvuru: beklenen ve gerçek durum, outbox (yayımlanan/yazılan)
+./demo.sh loan sign demo-tr-loan-003        # underwriter onayından sonra müşteri imzalar
+./demo.sh loan withdraw demo-tr-loan-003    # aktarımdan sonra cayma
+```
+
+P2'den bilinçli bir fark: bu demo, mantık worker olmadan görünsün diye **sentetik** tutarı ve skoru süreç
+değişkeninde tutar. Hedefte adımlar job worker olur ve süreçte P2'deki gibi yalnızca kimlik ve enum kalır.
+
+---
+
 ## Demo senaryosu
 
 1. **Operate:** `pay-instant-exception`, 9 örnek. Yerleşmiş bir örneği açın: yol `Task_CaptureHold` üzerinden
@@ -341,6 +455,13 @@ girmez; `OutputVariables` bunları çalışma anında reddeder.
 4. **Hub:** P2 modeli, `lib-await-external-status` ve iki DMN.
 5. **Güvenlik:** `kubectl -n bpo-demo-ms logs deploy/sim-psg-tr` kabul edilen audience'ı ve çağrı sayısını
    gösterir; geçerli token'ı olmayan çağrı 401 veya 403 alır.
+6. **Saga (Operate):** `loan-personal-saga`, `demo-tr-loan-005`'i açın: telafi işleyicileri ters sırada çalışmış,
+   `outbox` değişkeninde olaylar sırayla durur. `demo-tr-loan-006`'da cayma üç telafiyi birden çalıştırır.
+7. **Outbox (Operate):** `loan-event-consumer` örnekleri, relay'in yayımladığı olaylardır; sayıları
+   `./demo.sh loan` çıktısındaki yayımlanan olay sayısıyla aynıdır.
+8. **Tasklist ve mesaj:** `demo-tr-loan-003`'ü onaylayın, `./demo.sh loan sign demo-tr-loan-003` ile imzalayın,
+   isterseniz `./demo.sh loan withdraw demo-tr-loan-003` ile cayın. Aynı komutu tekrar verince motor tekrar eden
+   mesajı düşürür.
 
 ---
 
@@ -351,6 +472,7 @@ girmez; `OutputVariables` bunları çalışma anında reddeder.
 | k3s (Linux sandbox, `DEMO_CLUSTER=current`, `DEMO_IMAGE_LOAD` ile) | `./install.sh` baştan sona çalıştı; 14 pod çalışıyor, doğrulama 4 bloke tahsilini gördü |
 | Docker Desktop, kind modu (macOS) | Temiz klondan `./install.sh` baştan sona çalıştı (çıkış kodu 0); 12 pod çalışıyor, doğrulama 4 bloke tahsilini gördü |
 | Docker Desktop kubeadm modu, OrbStack, Rancher Desktop, minikube | Denenmedi |
+| İhtiyaç kredisi sagası, kümesiz (`tests/loan-saga/run.sh`: sabit Camunda 8.10.4 ve yükleyici imajı Docker'da, gerçek `load.sh`) | 6 başvurunun sonucu, outbox sırası, relay işareti ve tüketici sayısı beklendiği gibi; kümede henüz denenmedi |
 
 Süreler yaklaşıktır ve ağa, makineye göre değişir.
 
@@ -377,10 +499,11 @@ Süreler yaklaşıktır ve ağa, makineye göre değişir.
 
 | Komut | Ne yapar |
 |---|---|
-| `./demo.sh up\|open\|login\|status\|down` | Tek giriş noktası: aşağıdaki betikleri çağırır; `login` presenter şifresini ekrana yazmadan panoya kopyalar |
+| `./demo.sh up\|open\|login\|status\|loan\|down` | Tek giriş noktası: aşağıdaki betikleri çağırır; `login` presenter şifresini ekrana yazmadan panoya kopyalar |
 | `./install.sh` | Kurar veya günceller (tekrar çalıştırılabilir) |
 | `./open.sh` | Arayüzleri 127.0.0.1'de yayınlar; kopan bağlantıyı yeniden kurar, port doluysa başlamadan hata verir; Ctrl-C ile kapanır |
 | `./status.sh` | Pod'lar, yükleyici sonucu, simülatör sayaçları, worker uyarıları, 9 ödeme için beklenen ve gerçek durum tablosu |
+| `./demo.sh loan [sign\|withdraw <id>]` | İhtiyaç kredisi sagası: 6 başvurunun beklenen ve gerçek durumu ile outbox sayıları; `sign` ve `withdraw` müşteri mesajını yayımlar |
 | `./uninstall.sh` | Helm sürümünü ve namespace'i siler (veri ve Secret'lar dahil) |
 
 | Ortam değişkeni | Varsayılan | Anlamı |
@@ -421,14 +544,15 @@ kubectl -n bpo-demo-ms logs <pod> --tail=50
 ## Depo yapısı
 
 ```text
-demo.sh                tek giriş noktası (up · open · login · status · down)
-install.sh  open.sh  status.sh  uninstall.sh
+demo.sh                tek giriş noktası (up · open · login · status · loan · down)
+install.sh  open.sh  status.sh  loan.sh  uninstall.sh
 lib/common.sh          küme seçimi, yerel API koruması, imaj aktarımı
 helm/                  values-camunda.yaml, chart-lock.yaml (camunda-platform 15.1.1, sha256)
 k8s/                   00 namespace · 10 postgres · 20 keycloak · 30 keycloak istemcileri
                        40 simülatörler + worker · 50 network policy · 60 yükleyici Job
-models/                P2 BPMN, L3 kütüphane süreci, 2 DMN, 2 form
-sample-data/           scenarios.json (9 sentetik ödeme), load.sh
+models/                P2 BPMN, L3 kütüphane süreci, 2 DMN, 2 form; kredi sagası, outbox relay, tüketici, DMN, form
+sample-data/           scenarios.json (9 sentetik ödeme), loans.json (6 sentetik kredi başvurusu), load.sh
+tests/loan-saga/       kümesiz uçtan uca kredi sagası testi
 app/                   Gradle çok modüllü uygulama ve çok aşamalı Dockerfile
   bpo-worker-kit/      idempotency anahtarları, çıktı korkuluğu, sağlayıcı HTTP, hata eşleme
   bpo-worker-payments/ P2 job worker'ları (handler → port → adapter)
@@ -450,6 +574,7 @@ Bunlar bilinçli demo kısayollarıdır.
 | 7 günlük demo CA, Camunda iç trafiği HTTP | Mesh, katı mTLS ve DPoP |
 | Sağlayıcılar simülatör | Yayımlanmış katalog sözleşmeleri (`acc`, `pay`, `psg-tr`, `ntf`) |
 | Connectors ve Hub açık | Kapalı; her dış çağrı sözleşmesi olan bir worker'dan geçer |
+| Kredi sagasının adımları FEEL script task, outbox süreç değişkeninde, broker yerine sinyal | Adımlar job worker; outbox servisin veritabanında, relay Kafka'ya yazar; süreçte yalnızca kimlik ve enum |
 
 Kaynak: `COPUR/neo-fintechbankx-bpo-process-orchestration` commit `b8c4f50` (`demo/microservices`). Bu
 depoda eklenenler: sağlayıcı başına worker kapsamları (`BPO_AUTH_SCOPE_*`), kind modu imaj aktarımı, Docker

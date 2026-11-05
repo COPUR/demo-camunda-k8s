@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+                  xmlns:modeler="http://camunda.org/schema/modeler/1.0"
+                  id="Definitions_LibOutboxRelay"
+                  targetNamespace="https://fintechbankx.example/bpo"
+                  exporter="fbx-bpo" exporterVersion="0.1.0"
+                  modeler:executionPlatform="Camunda Cloud"
+                  modeler:executionPlatformVersion="8.10.0">
+  <bpmn:signal id="Signal_LoanEvent" name="Sig_LoanEventPublished" />
+  <!-- Outbox relay, called after each commit point of loan-personal-saga. events are the outbox entries after the
+       relay mark (relayedFrom); each is published in order, then the mark moves (relayedUpTo). A crash between the
+       two re-publishes on retry, never loses an event: at-least-once, and the deterministic eventId lets consumers
+       drop the copy. Here the broker is a BPMN signal; in a target system this is the step that hands the event to
+       Kafka (Redpanda) or another broker. -->
+  <bpmn:process id="lib-outbox-relay" name="Outbox relay" isExecutable="true">
+    <bpmn:extensionElements>
+      <zeebe:versionTag value="0.1.0" />
+    </bpmn:extensionElements>
+    <bpmn:startEvent id="StartEvent_RelayRequested" name="Relay requested">
+      <bpmn:outgoing>Flow_ToPublishEach</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:subProcess id="SubProcess_PublishEach" name="Publish each pending event">
+      <bpmn:incoming>Flow_ToPublishEach</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToMarkRelayed</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true">
+        <bpmn:extensionElements>
+          <zeebe:loopCharacteristics inputCollection="=events" inputElement="event" />
+        </bpmn:extensionElements>
+      </bpmn:multiInstanceLoopCharacteristics>
+      <bpmn:startEvent id="StartEvent_PublishOne">
+        <bpmn:outgoing>Flow_ToPublishOne</bpmn:outgoing>
+      </bpmn:startEvent>
+      <bpmn:intermediateThrowEvent id="Event_PublishEvent" name="Publish the event">
+        <bpmn:extensionElements>
+          <zeebe:ioMapping>
+            <zeebe:input source="=event.eventId" target="eventId" />
+            <zeebe:input source="=event.type" target="eventType" />
+            <zeebe:input source="=event.applicationId" target="applicationId" />
+            <zeebe:input source="=event" target="loanEvent" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_ToPublishOne</bpmn:incoming>
+        <bpmn:outgoing>Flow_ToPublished</bpmn:outgoing>
+        <bpmn:signalEventDefinition id="SignalEventDefinition_PublishEvent" signalRef="Signal_LoanEvent" />
+      </bpmn:intermediateThrowEvent>
+      <bpmn:endEvent id="EndEvent_Published">
+        <bpmn:incoming>Flow_ToPublished</bpmn:incoming>
+      </bpmn:endEvent>
+      <bpmn:sequenceFlow id="Flow_ToPublishOne" sourceRef="StartEvent_PublishOne" targetRef="Event_PublishEvent" />
+      <bpmn:sequenceFlow id="Flow_ToPublished" sourceRef="Event_PublishEvent" targetRef="EndEvent_Published" />
+    </bpmn:subProcess>
+    <bpmn:scriptTask id="Task_MarkRelayed" name="Move the relay mark">
+      <bpmn:extensionElements>
+        <zeebe:script expression="=relayedFrom + count(events)" resultVariable="relayedUpTo" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToMarkRelayed</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToRelayed</bpmn:outgoing>
+    </bpmn:scriptTask>
+    <bpmn:endEvent id="EndEvent_Relayed" name="Events relayed">
+      <bpmn:incoming>Flow_ToRelayed</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="Flow_ToPublishEach" sourceRef="StartEvent_RelayRequested" targetRef="SubProcess_PublishEach" />
+    <bpmn:sequenceFlow id="Flow_ToMarkRelayed" sourceRef="SubProcess_PublishEach" targetRef="Task_MarkRelayed" />
+    <bpmn:sequenceFlow id="Flow_ToRelayed" sourceRef="Task_MarkRelayed" targetRef="EndEvent_Relayed" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_lib-outbox-relay">
+    <bpmndi:BPMNPlane id="BPMNPlane_lib-outbox-relay" bpmnElement="lib-outbox-relay">
+      <bpmndi:BPMNShape id="StartEvent_RelayRequested_di" bpmnElement="StartEvent_RelayRequested">
+        <dc:Bounds x="172" y="182" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="SubProcess_PublishEach_di" bpmnElement="SubProcess_PublishEach" isExpanded="true">
+        <dc:Bounds x="260" y="100" width="330" height="200" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="StartEvent_PublishOne_di" bpmnElement="StartEvent_PublishOne">
+        <dc:Bounds x="300" y="182" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_PublishEvent_di" bpmnElement="Event_PublishEvent">
+        <dc:Bounds x="400" y="182" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_Published_di" bpmnElement="EndEvent_Published">
+        <dc:Bounds x="510" y="182" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_MarkRelayed_di" bpmnElement="Task_MarkRelayed">
+        <dc:Bounds x="640" y="160" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_Relayed_di" bpmnElement="EndEvent_Relayed">
+        <dc:Bounds x="802" y="182" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Flow_ToPublishOne_di" bpmnElement="Flow_ToPublishOne">
+        <di:waypoint x="336" y="200" />
+        <di:waypoint x="400" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToPublished_di" bpmnElement="Flow_ToPublished">
+        <di:waypoint x="436" y="200" />
+        <di:waypoint x="510" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToPublishEach_di" bpmnElement="Flow_ToPublishEach">
+        <di:waypoint x="208" y="200" />
+        <di:waypoint x="260" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToMarkRelayed_di" bpmnElement="Flow_ToMarkRelayed">
+        <di:waypoint x="590" y="200" />
+        <di:waypoint x="640" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToRelayed_di" bpmnElement="Flow_ToRelayed">
+        <di:waypoint x="740" y="200" />
+        <di:waypoint x="802" y="200" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

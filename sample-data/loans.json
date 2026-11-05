@@ -1,0 +1,8 @@
+{
+  "demo-tr-loan-001": {"customerId": "demo-tr-cust-001", "amount": 80000, "termMonths": 24, "monthlyIncome": 60000, "creditScore": 1650, "coreBankingAnswer": "ACCEPTED", "signatureTimeout": "PT2M", "withdrawalPeriod": "PT3M"},
+  "demo-tr-loan-002": {"customerId": "demo-tr-cust-002", "amount": 40000, "termMonths": 12, "monthlyIncome": 35000, "creditScore": 950, "coreBankingAnswer": "ACCEPTED", "signatureTimeout": "PT2M", "withdrawalPeriod": "PT3M"},
+  "demo-tr-loan-003": {"customerId": "demo-tr-cust-003", "amount": 120000, "termMonths": 36, "monthlyIncome": 45000, "creditScore": 1250, "coreBankingAnswer": "ACCEPTED", "signatureTimeout": "PT15M", "withdrawalPeriod": "PT10M"},
+  "demo-tr-loan-004": {"customerId": "demo-tr-cust-004", "amount": 60000, "termMonths": 18, "monthlyIncome": 50000, "creditScore": 1700, "coreBankingAnswer": "ACCEPTED", "signatureTimeout": "PT1M", "withdrawalPeriod": "PT3M"},
+  "demo-tr-loan-005": {"customerId": "demo-tr-cust-005", "amount": 95000, "termMonths": 24, "monthlyIncome": 70000, "creditScore": 1580, "coreBankingAnswer": "REJECTED", "signatureTimeout": "PT2M", "withdrawalPeriod": "PT3M"},
+  "demo-tr-loan-006": {"customerId": "demo-tr-cust-006", "amount": 50000, "termMonths": 12, "monthlyIncome": 55000, "creditScore": 1820, "coreBankingAnswer": "ACCEPTED", "signatureTimeout": "PT2M", "withdrawalPeriod": "PT10M"}
+}
