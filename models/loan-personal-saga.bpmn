@@ -1,0 +1,822 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+                  xmlns:modeler="http://camunda.org/schema/modeler/1.0"
+                  id="Definitions_LoanPersonalSaga"
+                  targetNamespace="https://fintechbankx.example/bpo"
+                  exporter="fbx-bpo" exporterVersion="0.1.0"
+                  modeler:executionPlatform="Camunda Cloud"
+                  modeler:executionPlatformVersion="8.10.0">
+  <bpmn:error id="Error_SignatureTimeout" name="Err_SignatureTimeout" errorCode="Err_SignatureTimeout" />
+  <bpmn:error id="Error_DisbursementRejected" name="Err_DisbursementRejected" errorCode="Err_DisbursementRejected" />
+  <bpmn:message id="Message_ContractSigned" name="Msg_LoanContractSigned">
+    <bpmn:extensionElements>
+      <zeebe:subscription correlationKey="=applicationId" />
+    </bpmn:extensionElements>
+  </bpmn:message>
+  <bpmn:message id="Message_LoanWithdrawn" name="Msg_LoanWithdrawn">
+    <bpmn:extensionElements>
+      <zeebe:subscription correlationKey="=applicationId" />
+    </bpmn:extensionElements>
+  </bpmn:message>
+  <!-- Consumer loan (ihtiyaç kredisi) disbursement as a saga, with the engine's own state as the transactional
+       outbox. Synthetic demo only (demo-tr-loan-*): every step is a FEEL script task that stands in for a call to the
+       owning system (limit, contract, core banking), so the demo needs no extra worker or simulator.
+       Saga: three local steps, each with its own compensation handler. A failure inside the saga (signature window
+       closed, core banking rejects the transfer) undoes the completed steps in reverse order; a withdrawal (cayma)
+       after disbursement undoes all of them at once.
+       Outbox: each step writes its domain result and its event into the same engine commit (one output mapping set),
+       so there is no dual write. lib-outbox-relay publishes the events not yet relayed and moves the relay mark;
+       event ids are deterministic, so consumers drop a redelivery. -->
+  <bpmn:process id="loan-personal-saga" name="Consumer loan disbursement (saga)" isExecutable="true">
+    <bpmn:extensionElements>
+      <zeebe:versionTag value="0.1.0" />
+    </bpmn:extensionElements>
+    <bpmn:startEvent id="StartEvent_LoanApplied" name="Loan application received">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:output source="=[]" target="outbox" />
+          <zeebe:output source="=0" target="outboxRelayed" />
+          <zeebe:output source="=&#34;PENDING&#34;" target="sagaState" />
+          <zeebe:output source="=if signatureTimeout = null then &#34;P2D&#34; else signatureTimeout" target="signatureTimeout" />
+          <zeebe:output source="=if withdrawalPeriod = null then &#34;P14D&#34; else withdrawalPeriod" target="withdrawalPeriod" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:outgoing>Flow_ToScore</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:businessRuleTask id="Task_ScoreApplication" name="Score the application">
+      <bpmn:extensionElements>
+        <zeebe:calledDecision decisionId="loan-credit-decision" resultVariable="creditDecision" bindingType="versionTag" versionTag="0.1.0" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToScore</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToCreditDecision</bpmn:outgoing>
+    </bpmn:businessRuleTask>
+    <bpmn:exclusiveGateway id="Gateway_CreditDecision" name="Credit decision?" default="Flow_Declined">
+      <bpmn:incoming>Flow_ToCreditDecision</bpmn:incoming>
+      <bpmn:outgoing>Flow_Approved</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Referred</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Declined</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:userTask id="Task_UnderwriterReview" name="Underwriter reviews the application">
+      <bpmn:extensionElements>
+        <zeebe:userTask />
+        <zeebe:formDefinition formId="loan-underwriter-decision" bindingType="deployment" />
+        <zeebe:assignmentDefinition candidateGroups="=[&#34;loan-underwriters&#34;]" />
+        <zeebe:taskSchedule dueDate="=now() + duration(&#34;PT30M&#34;)" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=underwriterDecision" target="underwriterDecision" />
+          <zeebe:output source="=if underwriterDecision = &#34;DECLINE&#34; then &#34;Declined by the underwriter&#34; else null" target="declineReason" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_Referred</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToUnderwriterDecision</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:boundaryEvent id="BoundaryEvent_UnderwriterSla" name="Underwriter SLA expired" attachedToRef="Task_UnderwriterReview">
+      <bpmn:outgoing>Flow_UnderwriterSlaToNoDecision</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="TimerEventDefinition_UnderwriterSla">
+        <bpmn:timeDuration>PT30M</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:intermediateThrowEvent id="Event_NoUnderwriterDecision" name="No underwriter decision">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:output source="=&#34;No underwriter decision in time&#34;" target="declineReason" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_UnderwriterSlaToNoDecision</bpmn:incoming>
+      <bpmn:outgoing>Flow_NoDecisionToDeclined</bpmn:outgoing>
+    </bpmn:intermediateThrowEvent>
+    <bpmn:exclusiveGateway id="Gateway_UnderwriterDecision" name="Underwriter decision?" default="Flow_UnderwriterDeclined">
+      <bpmn:incoming>Flow_ToUnderwriterDecision</bpmn:incoming>
+      <bpmn:outgoing>Flow_UnderwriterApproved</bpmn:outgoing>
+      <bpmn:outgoing>Flow_UnderwriterDeclined</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:exclusiveGateway id="Gateway_JoinApproved">
+      <bpmn:incoming>Flow_Approved</bpmn:incoming>
+      <bpmn:incoming>Flow_UnderwriterApproved</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToSaga</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:exclusiveGateway id="Gateway_JoinDeclined">
+      <bpmn:incoming>Flow_Declined</bpmn:incoming>
+      <bpmn:incoming>Flow_UnderwriterDeclined</bpmn:incoming>
+      <bpmn:incoming>Flow_NoDecisionToDeclined</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToRecordDecline</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:scriptTask id="Task_RecordDecline" name="Record the decline">
+      <bpmn:extensionElements>
+        <zeebe:script expression="=&#34;DECLINED&#34;" resultVariable="loanOutcome" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=loanOutcome" target="loanOutcome" />
+          <zeebe:output source="=append(outbox, {eventId: applicationId + &#34;:ApplicationDeclined&#34;, type: &#34;ApplicationDeclined&#34;, applicationId: applicationId, occurredAt: string(date and time(now(), &#34;Z&#34;)), reason: if declineReason != null then declineReason else creditDecision.reason})" target="outbox" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToRecordDecline</bpmn:incoming>
+      <bpmn:outgoing>Flow_DeclineToClose</bpmn:outgoing>
+    </bpmn:scriptTask>
+    <!-- The saga. Every step is local and commits with its outbox event; its compensation handler undoes it and
+         writes the opposite event. Error end events inside fire the rollback event sub-process, which compensates
+         the completed steps one by one in reverse order (activityRef), then lets the sub-process complete with
+         sagaState COMPENSATED. -->
+    <bpmn:subProcess id="SubProcess_DisbursementSaga" name="Disbursement saga">
+      <bpmn:incoming>Flow_ToSaga</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToSagaOutcome</bpmn:outgoing>
+      <bpmn:startEvent id="StartEvent_SagaStarted" name="Saga started">
+        <bpmn:outgoing>Flow_ToReserveLimit</bpmn:outgoing>
+      </bpmn:startEvent>
+      <bpmn:scriptTask id="Task_ReserveLimit" name="Reserve the credit limit">
+        <bpmn:extensionElements>
+          <zeebe:script expression="={reservationId: &#34;lim-&#34; + applicationId, amount: amount, status: &#34;RESERVED&#34;}" resultVariable="limitReservation" />
+          <zeebe:ioMapping>
+            <zeebe:output source="=limitReservation" target="limitReservation" />
+            <zeebe:output source="=append(outbox, {eventId: applicationId + &#34;:LimitReserved&#34;, type: &#34;LimitReserved&#34;, applicationId: applicationId, occurredAt: string(date and time(now(), &#34;Z&#34;)), amount: amount})" target="outbox" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_ToReserveLimit</bpmn:incoming>
+        <bpmn:outgoing>Flow_ToDrawUpContract</bpmn:outgoing>
+      </bpmn:scriptTask>
+      <bpmn:scriptTask id="Task_DrawUpContract" name="Draw up the loan contract">
+        <bpmn:extensionElements>
+          <zeebe:script expression="={contractId: &#34;ctr-&#34; + applicationId, termMonths: termMonths, monthlyRate: creditDecision.monthlyRate, monthlyInstallment: decimal(amount * creditDecision.monthlyRate / (1 - (1 + creditDecision.monthlyRate) ** (-termMonths)), 2), status: &#34;DRAWN_UP&#34;}" resultVariable="contract" />
+          <zeebe:ioMapping>
+            <zeebe:output source="=contract" target="contract" />
+            <zeebe:output source="=append(outbox, {eventId: applicationId + &#34;:ContractDrawnUp&#34;, type: &#34;ContractDrawnUp&#34;, applicationId: applicationId, occurredAt: string(date and time(now(), &#34;Z&#34;)), contractId: &#34;ctr-&#34; + applicationId})" target="outbox" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_ToDrawUpContract</bpmn:incoming>
+        <bpmn:outgoing>Flow_ToAwaitSignature</bpmn:outgoing>
+      </bpmn:scriptTask>
+      <bpmn:receiveTask id="Task_AwaitSignature" name="Await the customer's e-signature" messageRef="Message_ContractSigned">
+        <bpmn:incoming>Flow_ToAwaitSignature</bpmn:incoming>
+        <bpmn:outgoing>Flow_ToCoreAnswer</bpmn:outgoing>
+      </bpmn:receiveTask>
+      <bpmn:boundaryEvent id="BoundaryEvent_SignatureWindow" name="Signature window closed" attachedToRef="Task_AwaitSignature">
+        <bpmn:outgoing>Flow_ToSignatureExpired</bpmn:outgoing>
+        <bpmn:timerEventDefinition id="TimerEventDefinition_SignatureWindow">
+          <bpmn:timeDuration>=signatureTimeout</bpmn:timeDuration>
+        </bpmn:timerEventDefinition>
+      </bpmn:boundaryEvent>
+      <bpmn:endEvent id="EndEvent_SignatureExpired" name="Not signed in time">
+        <bpmn:incoming>Flow_ToSignatureExpired</bpmn:incoming>
+        <bpmn:errorEventDefinition id="ErrorEventDefinition_SignatureExpired" errorRef="Error_SignatureTimeout" />
+      </bpmn:endEvent>
+      <!-- Stand-in for the core banking answer; with a job worker this is a BPMN error thrown by the transfer task. -->
+      <bpmn:exclusiveGateway id="Gateway_CoreAnswer" name="Core banking accepts the transfer?" default="Flow_CoreAccepted">
+        <bpmn:incoming>Flow_ToCoreAnswer</bpmn:incoming>
+        <bpmn:outgoing>Flow_CoreAccepted</bpmn:outgoing>
+        <bpmn:outgoing>Flow_CoreRejected</bpmn:outgoing>
+      </bpmn:exclusiveGateway>
+      <bpmn:endEvent id="EndEvent_DisbursementRejected" name="Transfer rejected">
+        <bpmn:incoming>Flow_CoreRejected</bpmn:incoming>
+        <bpmn:errorEventDefinition id="ErrorEventDefinition_DisbursementRejected" errorRef="Error_DisbursementRejected" />
+      </bpmn:endEvent>
+      <bpmn:scriptTask id="Task_Disburse" name="Disburse to the customer account">
+        <bpmn:extensionElements>
+          <zeebe:script expression="={transferId: &#34;trf-&#34; + applicationId, amount: amount, status: &#34;DISBURSED&#34;}" resultVariable="disbursement" />
+          <zeebe:ioMapping>
+            <zeebe:output source="=disbursement" target="disbursement" />
+            <zeebe:output source="=&#34;COMMITTED&#34;" target="sagaState" />
+            <zeebe:output source="=append(outbox, {eventId: applicationId + &#34;:LoanDisbursed&#34;, type: &#34;LoanDisbursed&#34;, applicationId: applicationId, occurredAt: string(date and time(now(), &#34;Z&#34;)), amount: amount})" target="outbox" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>Flow_CoreAccepted</bpmn:incoming>
+        <bpmn:outgoing>Flow_ToSagaCommitted</bpmn:outgoing>
+      </bpmn:scriptTask>
+      <bpmn:endEvent id="EndEvent_SagaCommitted" name="Saga committed">
+        <bpmn:incoming>Flow_ToSagaCommitted</bpmn:incoming>
+      </bpmn:endEvent>
+      <bpmn:boundaryEvent id="BoundaryEvent_CompensateLimit" attachedToRef="Task_ReserveLimit">
+        <bpmn:compensateEventDefinition id="CompensateEventDefinition_CompensateLimit" />
+      </bpmn:boundaryEvent>
+      <bpmn:scriptTask id="Task_ReleaseLimit" name="Release the limit reservation" isForCompensation="true">
+        <bpmn:extensionElements>
+          <zeebe:script expression="={reservationId: limitReservation.reservationId, amount: limitReservation.amount, status: &#34;RELEASED&#34;}" resultVariable="limitReservation" />
+          <zeebe:ioMapping>
+            <zeebe:output source="=limitReservation" target="limitReservation" />
+            <zeebe:output source="=append(outbox, {eventId: applicationId + &#34;:LimitReleased&#34;, type: &#34;LimitReleased&#34;, applicationId: applicationId, occurredAt: string(date and time(now(), &#34;Z&#34;))})" target="outbox" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+      </bpmn:scriptTask>
+      <bpmn:boundaryEvent id="BoundaryEvent_CompensateContract" attachedToRef="Task_DrawUpContract">
+        <bpmn:compensateEventDefinition id="CompensateEventDefinition_CompensateContract" />
+      </bpmn:boundaryEvent>
+      <bpmn:scriptTask id="Task_CancelContract" name="Cancel the contract" isForCompensation="true">
+        <bpmn:extensionElements>
+          <zeebe:script expression="=put(contract, &#34;status&#34;, &#34;CANCELLED&#34;)" resultVariable="contract" />
+          <zeebe:ioMapping>
+            <zeebe:output source="=contract" target="contract" />
+            <zeebe:output source="=append(outbox, {eventId: applicationId + &#34;:ContractCancelled&#34;, type: &#34;ContractCancelled&#34;, applicationId: applicationId, occurredAt: string(date and time(now(), &#34;Z&#34;)), contractId: contract.contractId})" target="outbox" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+      </bpmn:scriptTask>
+      <bpmn:boundaryEvent id="BoundaryEvent_CompensateDisbursement" attachedToRef="Task_Disburse">
+        <bpmn:compensateEventDefinition id="CompensateEventDefinition_CompensateDisbursement" />
+      </bpmn:boundaryEvent>
+      <bpmn:scriptTask id="Task_CollectBack" name="Collect the disbursement back" isForCompensation="true">
+        <bpmn:extensionElements>
+          <zeebe:script expression="=put(disbursement, &#34;status&#34;, &#34;COLLECTED_BACK&#34;)" resultVariable="disbursement" />
+          <zeebe:ioMapping>
+            <zeebe:output source="=disbursement" target="disbursement" />
+            <zeebe:output source="=append(outbox, {eventId: applicationId + &#34;:DisbursementCollectedBack&#34;, type: &#34;DisbursementCollectedBack&#34;, applicationId: applicationId, occurredAt: string(date and time(now(), &#34;Z&#34;)), amount: disbursement.amount})" target="outbox" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+      </bpmn:scriptTask>
+      <bpmn:sequenceFlow id="Flow_ToReserveLimit" sourceRef="StartEvent_SagaStarted" targetRef="Task_ReserveLimit" />
+      <bpmn:sequenceFlow id="Flow_ToDrawUpContract" sourceRef="Task_ReserveLimit" targetRef="Task_DrawUpContract" />
+      <bpmn:sequenceFlow id="Flow_ToAwaitSignature" sourceRef="Task_DrawUpContract" targetRef="Task_AwaitSignature" />
+      <bpmn:sequenceFlow id="Flow_ToSignatureExpired" sourceRef="BoundaryEvent_SignatureWindow" targetRef="EndEvent_SignatureExpired" />
+      <bpmn:sequenceFlow id="Flow_ToCoreAnswer" sourceRef="Task_AwaitSignature" targetRef="Gateway_CoreAnswer" />
+      <bpmn:sequenceFlow id="Flow_CoreAccepted" name="yes" sourceRef="Gateway_CoreAnswer" targetRef="Task_Disburse" />
+      <bpmn:sequenceFlow id="Flow_CoreRejected" name="no" sourceRef="Gateway_CoreAnswer" targetRef="EndEvent_DisbursementRejected">
+        <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">=coreBankingAnswer = &#34;REJECTED&#34;</bpmn:conditionExpression>
+      </bpmn:sequenceFlow>
+      <bpmn:sequenceFlow id="Flow_ToSagaCommitted" sourceRef="Task_Disburse" targetRef="EndEvent_SagaCommitted" />
+      <bpmn:subProcess id="SubProcess_SagaRollback" name="Roll the saga back" triggeredByEvent="true">
+        <!-- Catches every error raised inside the saga. Reverse order: disbursement, contract, limit. A step that
+             never completed has nothing to compensate and its throw event passes straight on. -->
+        <bpmn:startEvent id="StartEvent_SagaFailed" name="Saga step failed">
+          <bpmn:extensionElements>
+            <zeebe:ioMapping>
+              <zeebe:output source="=errorCode" target="sagaFailure" />
+            </zeebe:ioMapping>
+          </bpmn:extensionElements>
+          <bpmn:outgoing>Flow_ToUndoDisbursement</bpmn:outgoing>
+          <bpmn:errorEventDefinition id="ErrorEventDefinition_SagaFailed" />
+        </bpmn:startEvent>
+        <bpmn:intermediateThrowEvent id="Event_UndoDisbursement" name="Undo the disbursement">
+          <bpmn:incoming>Flow_ToUndoDisbursement</bpmn:incoming>
+          <bpmn:outgoing>Flow_ToUndoContract</bpmn:outgoing>
+          <bpmn:compensateEventDefinition id="CompensateEventDefinition_UndoDisbursement" activityRef="Task_Disburse" />
+        </bpmn:intermediateThrowEvent>
+        <bpmn:intermediateThrowEvent id="Event_UndoContract" name="Undo the contract">
+          <bpmn:incoming>Flow_ToUndoContract</bpmn:incoming>
+          <bpmn:outgoing>Flow_ToUndoLimit</bpmn:outgoing>
+          <bpmn:compensateEventDefinition id="CompensateEventDefinition_UndoContract" activityRef="Task_DrawUpContract" />
+        </bpmn:intermediateThrowEvent>
+        <bpmn:intermediateThrowEvent id="Event_UndoLimit" name="Undo the limit reservation">
+          <bpmn:incoming>Flow_ToUndoLimit</bpmn:incoming>
+          <bpmn:outgoing>Flow_ToRecordRollback</bpmn:outgoing>
+          <bpmn:compensateEventDefinition id="CompensateEventDefinition_UndoLimit" activityRef="Task_ReserveLimit" />
+        </bpmn:intermediateThrowEvent>
+        <bpmn:scriptTask id="Task_RecordRollback" name="Record the rollback">
+          <bpmn:extensionElements>
+            <zeebe:script expression="=&#34;COMPENSATED&#34;" resultVariable="sagaState" />
+            <zeebe:ioMapping>
+              <zeebe:output source="=sagaState" target="sagaState" />
+              <zeebe:output source="=append(outbox, {eventId: applicationId + &#34;:LoanSagaCompensated&#34;, type: &#34;LoanSagaCompensated&#34;, applicationId: applicationId, occurredAt: string(date and time(now(), &#34;Z&#34;)), reason: sagaFailure})" target="outbox" />
+            </zeebe:ioMapping>
+          </bpmn:extensionElements>
+          <bpmn:incoming>Flow_ToRecordRollback</bpmn:incoming>
+          <bpmn:outgoing>Flow_ToRolledBack</bpmn:outgoing>
+        </bpmn:scriptTask>
+        <bpmn:endEvent id="EndEvent_RolledBack" name="Saga rolled back">
+          <bpmn:incoming>Flow_ToRolledBack</bpmn:incoming>
+        </bpmn:endEvent>
+        <bpmn:sequenceFlow id="Flow_ToUndoDisbursement" sourceRef="StartEvent_SagaFailed" targetRef="Event_UndoDisbursement" />
+        <bpmn:sequenceFlow id="Flow_ToUndoContract" sourceRef="Event_UndoDisbursement" targetRef="Event_UndoContract" />
+        <bpmn:sequenceFlow id="Flow_ToUndoLimit" sourceRef="Event_UndoContract" targetRef="Event_UndoLimit" />
+        <bpmn:sequenceFlow id="Flow_ToRecordRollback" sourceRef="Event_UndoLimit" targetRef="Task_RecordRollback" />
+        <bpmn:sequenceFlow id="Flow_ToRolledBack" sourceRef="Task_RecordRollback" targetRef="EndEvent_RolledBack" />
+      </bpmn:subProcess>
+      <bpmn:association id="Association_ReleaseLimit" associationDirection="One" sourceRef="BoundaryEvent_CompensateLimit" targetRef="Task_ReleaseLimit" />
+      <bpmn:association id="Association_CancelContract" associationDirection="One" sourceRef="BoundaryEvent_CompensateContract" targetRef="Task_CancelContract" />
+      <bpmn:association id="Association_CollectBack" associationDirection="One" sourceRef="BoundaryEvent_CompensateDisbursement" targetRef="Task_CollectBack" />
+    </bpmn:subProcess>
+    <bpmn:exclusiveGateway id="Gateway_SagaOutcome" name="Saga committed?" default="Flow_SagaCompensated">
+      <bpmn:incoming>Flow_ToSagaOutcome</bpmn:incoming>
+      <bpmn:outgoing>Flow_SagaCommitted</bpmn:outgoing>
+      <bpmn:outgoing>Flow_SagaCompensated</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:callActivity id="Task_RelayCommitted" name="Relay the outbox events">
+      <bpmn:extensionElements>
+        <zeebe:calledElement processId="lib-outbox-relay" propagateAllChildVariables="false" propagateAllParentVariables="false" bindingType="versionTag" versionTag="0.1.0" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=if outboxRelayed &lt; count(outbox) then sublist(outbox, outboxRelayed + 1) else []" target="events" />
+          <zeebe:input source="=outboxRelayed" target="relayedFrom" />
+          <zeebe:output source="=relayedUpTo" target="outboxRelayed" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_SagaCommitted</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToWithdrawalWindow</bpmn:outgoing>
+    </bpmn:callActivity>
+    <!-- Withdrawal right (cayma hakkı): the customer may give the loan back within the period (P14D; the demo
+         samples pass a few minutes). A withdrawal compensates the whole completed saga at once. -->
+    <bpmn:eventBasedGateway id="Gateway_WithdrawalWindow" name="Withdrawal period">
+      <bpmn:incoming>Flow_ToWithdrawalWindow</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToWithdrawn</bpmn:outgoing>
+      <bpmn:outgoing>Flow_ToPeriodOver</bpmn:outgoing>
+    </bpmn:eventBasedGateway>
+    <bpmn:intermediateCatchEvent id="Event_LoanWithdrawn" name="Customer withdraws">
+      <bpmn:incoming>Flow_ToWithdrawn</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToCompensateLoan</bpmn:outgoing>
+      <bpmn:messageEventDefinition id="MessageEventDefinition_LoanWithdrawn" messageRef="Message_LoanWithdrawn" />
+    </bpmn:intermediateCatchEvent>
+    <bpmn:intermediateCatchEvent id="Event_WithdrawalPeriodOver" name="Withdrawal period over">
+      <bpmn:incoming>Flow_ToPeriodOver</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToRecordActive</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="TimerEventDefinition_WithdrawalPeriod">
+        <bpmn:timeDuration>=withdrawalPeriod</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:intermediateCatchEvent>
+    <bpmn:intermediateThrowEvent id="Event_CompensateLoan" name="Undo the whole loan">
+      <bpmn:incoming>Flow_ToCompensateLoan</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToRecordWithdrawal</bpmn:outgoing>
+      <bpmn:compensateEventDefinition id="CompensateEventDefinition_CompensateLoan" />
+    </bpmn:intermediateThrowEvent>
+    <bpmn:scriptTask id="Task_RecordWithdrawal" name="Record the withdrawal">
+      <bpmn:extensionElements>
+        <zeebe:script expression="=&#34;WITHDRAWN&#34;" resultVariable="loanOutcome" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=loanOutcome" target="loanOutcome" />
+          <zeebe:output source="=append(outbox, {eventId: applicationId + &#34;:LoanWithdrawn&#34;, type: &#34;LoanWithdrawn&#34;, applicationId: applicationId, occurredAt: string(date and time(now(), &#34;Z&#34;))})" target="outbox" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToRecordWithdrawal</bpmn:incoming>
+      <bpmn:outgoing>Flow_WithdrawalToClose</bpmn:outgoing>
+    </bpmn:scriptTask>
+    <bpmn:scriptTask id="Task_RecordActive" name="Mark the loan active">
+      <bpmn:extensionElements>
+        <zeebe:script expression="=&#34;ACTIVE&#34;" resultVariable="loanOutcome" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=loanOutcome" target="loanOutcome" />
+          <zeebe:output source="=append(outbox, {eventId: applicationId + &#34;:LoanActivated&#34;, type: &#34;LoanActivated&#34;, applicationId: applicationId, occurredAt: string(date and time(now(), &#34;Z&#34;))})" target="outbox" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToRecordActive</bpmn:incoming>
+      <bpmn:outgoing>Flow_ActiveToClose</bpmn:outgoing>
+    </bpmn:scriptTask>
+    <bpmn:scriptTask id="Task_RecordRolledBack" name="Record the rolled-back application">
+      <bpmn:extensionElements>
+        <zeebe:script expression="=&#34;ROLLED_BACK&#34;" resultVariable="loanOutcome" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=loanOutcome" target="loanOutcome" />
+          <zeebe:output source="=append(outbox, {eventId: applicationId + &#34;:ApplicationRolledBack&#34;, type: &#34;ApplicationRolledBack&#34;, applicationId: applicationId, occurredAt: string(date and time(now(), &#34;Z&#34;)), reason: sagaFailure})" target="outbox" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_SagaCompensated</bpmn:incoming>
+      <bpmn:outgoing>Flow_RolledBackToClose</bpmn:outgoing>
+    </bpmn:scriptTask>
+    <bpmn:exclusiveGateway id="Gateway_JoinClose">
+      <bpmn:incoming>Flow_DeclineToClose</bpmn:incoming>
+      <bpmn:incoming>Flow_WithdrawalToClose</bpmn:incoming>
+      <bpmn:incoming>Flow_ActiveToClose</bpmn:incoming>
+      <bpmn:incoming>Flow_RolledBackToClose</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToRelayClosing</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:callActivity id="Task_RelayClosing" name="Relay the closing events">
+      <bpmn:extensionElements>
+        <zeebe:calledElement processId="lib-outbox-relay" propagateAllChildVariables="false" propagateAllParentVariables="false" bindingType="versionTag" versionTag="0.1.0" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=if outboxRelayed &lt; count(outbox) then sublist(outbox, outboxRelayed + 1) else []" target="events" />
+          <zeebe:input source="=outboxRelayed" target="relayedFrom" />
+          <zeebe:output source="=relayedUpTo" target="outboxRelayed" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToRelayClosing</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToClosed</bpmn:outgoing>
+    </bpmn:callActivity>
+    <bpmn:endEvent id="EndEvent_Closed" name="Loan application closed">
+      <bpmn:incoming>Flow_ToClosed</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="Flow_ToScore" sourceRef="StartEvent_LoanApplied" targetRef="Task_ScoreApplication" />
+    <bpmn:sequenceFlow id="Flow_ToCreditDecision" sourceRef="Task_ScoreApplication" targetRef="Gateway_CreditDecision" />
+    <bpmn:sequenceFlow id="Flow_Approved" name="APPROVE" sourceRef="Gateway_CreditDecision" targetRef="Gateway_JoinApproved">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">=creditDecision.outcome = &#34;APPROVE&#34;</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_Referred" name="REFER" sourceRef="Gateway_CreditDecision" targetRef="Task_UnderwriterReview">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">=creditDecision.outcome = &#34;REFER&#34;</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_Declined" name="DECLINE" sourceRef="Gateway_CreditDecision" targetRef="Gateway_JoinDeclined" />
+    <bpmn:sequenceFlow id="Flow_ToUnderwriterDecision" sourceRef="Task_UnderwriterReview" targetRef="Gateway_UnderwriterDecision" />
+    <bpmn:sequenceFlow id="Flow_UnderwriterApproved" name="approve" sourceRef="Gateway_UnderwriterDecision" targetRef="Gateway_JoinApproved">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">=underwriterDecision = &#34;APPROVE&#34;</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_UnderwriterDeclined" name="decline" sourceRef="Gateway_UnderwriterDecision" targetRef="Gateway_JoinDeclined" />
+    <bpmn:sequenceFlow id="Flow_UnderwriterSlaToNoDecision" sourceRef="BoundaryEvent_UnderwriterSla" targetRef="Event_NoUnderwriterDecision" />
+    <bpmn:sequenceFlow id="Flow_NoDecisionToDeclined" sourceRef="Event_NoUnderwriterDecision" targetRef="Gateway_JoinDeclined" />
+    <bpmn:sequenceFlow id="Flow_ToRecordDecline" sourceRef="Gateway_JoinDeclined" targetRef="Task_RecordDecline" />
+    <bpmn:sequenceFlow id="Flow_DeclineToClose" sourceRef="Task_RecordDecline" targetRef="Gateway_JoinClose" />
+    <bpmn:sequenceFlow id="Flow_ToSaga" sourceRef="Gateway_JoinApproved" targetRef="SubProcess_DisbursementSaga" />
+    <bpmn:sequenceFlow id="Flow_ToSagaOutcome" sourceRef="SubProcess_DisbursementSaga" targetRef="Gateway_SagaOutcome" />
+    <bpmn:sequenceFlow id="Flow_SagaCommitted" name="yes" sourceRef="Gateway_SagaOutcome" targetRef="Task_RelayCommitted">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">=sagaState = &#34;COMMITTED&#34;</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_SagaCompensated" name="no" sourceRef="Gateway_SagaOutcome" targetRef="Task_RecordRolledBack" />
+    <bpmn:sequenceFlow id="Flow_ToWithdrawalWindow" sourceRef="Task_RelayCommitted" targetRef="Gateway_WithdrawalWindow" />
+    <bpmn:sequenceFlow id="Flow_ToWithdrawn" sourceRef="Gateway_WithdrawalWindow" targetRef="Event_LoanWithdrawn" />
+    <bpmn:sequenceFlow id="Flow_ToPeriodOver" sourceRef="Gateway_WithdrawalWindow" targetRef="Event_WithdrawalPeriodOver" />
+    <bpmn:sequenceFlow id="Flow_ToCompensateLoan" sourceRef="Event_LoanWithdrawn" targetRef="Event_CompensateLoan" />
+    <bpmn:sequenceFlow id="Flow_ToRecordWithdrawal" sourceRef="Event_CompensateLoan" targetRef="Task_RecordWithdrawal" />
+    <bpmn:sequenceFlow id="Flow_ToRecordActive" sourceRef="Event_WithdrawalPeriodOver" targetRef="Task_RecordActive" />
+    <bpmn:sequenceFlow id="Flow_WithdrawalToClose" sourceRef="Task_RecordWithdrawal" targetRef="Gateway_JoinClose" />
+    <bpmn:sequenceFlow id="Flow_ActiveToClose" sourceRef="Task_RecordActive" targetRef="Gateway_JoinClose" />
+    <bpmn:sequenceFlow id="Flow_RolledBackToClose" sourceRef="Task_RecordRolledBack" targetRef="Gateway_JoinClose" />
+    <bpmn:sequenceFlow id="Flow_ToRelayClosing" sourceRef="Gateway_JoinClose" targetRef="Task_RelayClosing" />
+    <bpmn:sequenceFlow id="Flow_ToClosed" sourceRef="Task_RelayClosing" targetRef="EndEvent_Closed" />
+    <bpmn:textAnnotation id="TextAnnotation_Hitl">
+      <bpmn:text>[HITL] An underwriter decides REFER cases in Tasklist; the SLA timer declines the application when nobody acts.</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Association_Hitl" sourceRef="TextAnnotation_Hitl" targetRef="Task_UnderwriterReview" />
+    <bpmn:textAnnotation id="TextAnnotation_NoXa">
+      <bpmn:text>[No XA] Each step is one local engine commit: its result and its outbox event together. The saga replaces a distributed 2PC.</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Association_NoXa" sourceRef="TextAnnotation_NoXa" targetRef="Task_ReserveLimit" />
+    <bpmn:textAnnotation id="TextAnnotation_Resilience">
+      <bpmn:text>[Resilience] A timer bounds every wait; messageId and businessId drop repeats; the relay is at-least-once.</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Association_Resilience" sourceRef="TextAnnotation_Resilience" targetRef="Task_AwaitSignature" />
+    <bpmn:textAnnotation id="TextAnnotation_Compensation">
+      <bpmn:text>[Compensation] Every step has its own undo; only completed steps are undone.</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Association_Compensation" sourceRef="TextAnnotation_Compensation" targetRef="Task_CollectBack" />
+    <bpmn:textAnnotation id="TextAnnotation_Rollback">
+      <bpmn:text>[Compensation] Reverse order through activityRef: disbursement, contract, limit.</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Association_Rollback" sourceRef="TextAnnotation_Rollback" targetRef="SubProcess_SagaRollback" />
+    <bpmn:textAnnotation id="TextAnnotation_MultiCluster">
+      <bpmn:text>[Multi-cluster] Events leave only through the outbox relay; deterministic eventIds keep consumers in other clusters idempotent.</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Association_MultiCluster" sourceRef="TextAnnotation_MultiCluster" targetRef="Task_RelayCommitted" />
+    <bpmn:textAnnotation id="TextAnnotation_Withdrawal">
+      <bpmn:text>[Compensation] A withdrawal undoes the whole completed saga at once.</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Association_Withdrawal" sourceRef="TextAnnotation_Withdrawal" targetRef="Event_CompensateLoan" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_loan-personal-saga">
+    <bpmndi:BPMNPlane id="BPMNPlane_loan-personal-saga" bpmnElement="loan-personal-saga">
+      <bpmndi:BPMNShape id="StartEvent_LoanApplied_di" bpmnElement="StartEvent_LoanApplied">
+        <dc:Bounds x="172" y="382" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_ScoreApplication_di" bpmnElement="Task_ScoreApplication">
+        <dc:Bounds x="250" y="360" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_CreditDecision_di" bpmnElement="Gateway_CreditDecision">
+        <dc:Bounds x="405" y="375" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_UnderwriterReview_di" bpmnElement="Task_UnderwriterReview">
+        <dc:Bounds x="480" y="560" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BoundaryEvent_UnderwriterSla_di" bpmnElement="BoundaryEvent_UnderwriterSla">
+        <dc:Bounds x="512" y="622" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_NoUnderwriterDecision_di" bpmnElement="Event_NoUnderwriterDecision">
+        <dc:Bounds x="512" y="702" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_UnderwriterDecision_di" bpmnElement="Gateway_UnderwriterDecision">
+        <dc:Bounds x="635" y="575" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_JoinApproved_di" bpmnElement="Gateway_JoinApproved">
+        <dc:Bounds x="735" y="375" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_JoinDeclined_di" bpmnElement="Gateway_JoinDeclined">
+        <dc:Bounds x="405" y="135" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RecordDecline_di" bpmnElement="Task_RecordDecline">
+        <dc:Bounds x="480" y="120" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="SubProcess_DisbursementSaga_di" bpmnElement="SubProcess_DisbursementSaga" isExpanded="true">
+        <dc:Bounds x="830" y="240" width="1010" height="560" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="StartEvent_SagaStarted_di" bpmnElement="StartEvent_SagaStarted">
+        <dc:Bounds x="862" y="382" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_ReserveLimit_di" bpmnElement="Task_ReserveLimit">
+        <dc:Bounds x="940" y="360" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_DrawUpContract_di" bpmnElement="Task_DrawUpContract">
+        <dc:Bounds x="1090" y="360" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_AwaitSignature_di" bpmnElement="Task_AwaitSignature">
+        <dc:Bounds x="1240" y="360" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BoundaryEvent_SignatureWindow_di" bpmnElement="BoundaryEvent_SignatureWindow">
+        <dc:Bounds x="1272" y="422" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_SignatureExpired_di" bpmnElement="EndEvent_SignatureExpired">
+        <dc:Bounds x="1272" y="492" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_CoreAnswer_di" bpmnElement="Gateway_CoreAnswer">
+        <dc:Bounds x="1395" y="375" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_DisbursementRejected_di" bpmnElement="EndEvent_DisbursementRejected">
+        <dc:Bounds x="1402" y="492" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Disburse_di" bpmnElement="Task_Disburse">
+        <dc:Bounds x="1490" y="360" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_SagaCommitted_di" bpmnElement="EndEvent_SagaCommitted">
+        <dc:Bounds x="1652" y="382" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BoundaryEvent_CompensateLimit_di" bpmnElement="BoundaryEvent_CompensateLimit">
+        <dc:Bounds x="972" y="422" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_ReleaseLimit_di" bpmnElement="Task_ReleaseLimit">
+        <dc:Bounds x="940" y="480" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BoundaryEvent_CompensateContract_di" bpmnElement="BoundaryEvent_CompensateContract">
+        <dc:Bounds x="1122" y="422" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_CancelContract_di" bpmnElement="Task_CancelContract">
+        <dc:Bounds x="1090" y="480" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BoundaryEvent_CompensateDisbursement_di" bpmnElement="BoundaryEvent_CompensateDisbursement">
+        <dc:Bounds x="1522" y="422" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_CollectBack_di" bpmnElement="Task_CollectBack">
+        <dc:Bounds x="1490" y="480" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="SubProcess_SagaRollback_di" bpmnElement="SubProcess_SagaRollback" isExpanded="true">
+        <dc:Bounds x="900" y="610" width="760" height="160" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="StartEvent_SagaFailed_di" bpmnElement="StartEvent_SagaFailed">
+        <dc:Bounds x="940" y="672" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_UndoDisbursement_di" bpmnElement="Event_UndoDisbursement">
+        <dc:Bounds x="1040" y="672" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_UndoContract_di" bpmnElement="Event_UndoContract">
+        <dc:Bounds x="1140" y="672" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_UndoLimit_di" bpmnElement="Event_UndoLimit">
+        <dc:Bounds x="1240" y="672" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RecordRollback_di" bpmnElement="Task_RecordRollback">
+        <dc:Bounds x="1340" y="650" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_RolledBack_di" bpmnElement="EndEvent_RolledBack">
+        <dc:Bounds x="1500" y="672" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_SagaOutcome_di" bpmnElement="Gateway_SagaOutcome">
+        <dc:Bounds x="1885" y="375" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RelayCommitted_di" bpmnElement="Task_RelayCommitted">
+        <dc:Bounds x="1970" y="360" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_WithdrawalWindow_di" bpmnElement="Gateway_WithdrawalWindow">
+        <dc:Bounds x="2125" y="375" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_LoanWithdrawn_di" bpmnElement="Event_LoanWithdrawn">
+        <dc:Bounds x="2222" y="382" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_WithdrawalPeriodOver_di" bpmnElement="Event_WithdrawalPeriodOver">
+        <dc:Bounds x="2222" y="532" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_CompensateLoan_di" bpmnElement="Event_CompensateLoan">
+        <dc:Bounds x="2312" y="382" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RecordWithdrawal_di" bpmnElement="Task_RecordWithdrawal">
+        <dc:Bounds x="2400" y="360" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RecordActive_di" bpmnElement="Task_RecordActive">
+        <dc:Bounds x="2400" y="510" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RecordRolledBack_di" bpmnElement="Task_RecordRolledBack">
+        <dc:Bounds x="2400" y="820" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_JoinClose_di" bpmnElement="Gateway_JoinClose">
+        <dc:Bounds x="2565" y="375" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RelayClosing_di" bpmnElement="Task_RelayClosing">
+        <dc:Bounds x="2650" y="360" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_Closed_di" bpmnElement="EndEvent_Closed">
+        <dc:Bounds x="2812" y="382" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="TextAnnotation_Hitl_di" bpmnElement="TextAnnotation_Hitl">
+        <dc:Bounds x="600" y="690" width="220" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="TextAnnotation_NoXa_di" bpmnElement="TextAnnotation_NoXa">
+        <dc:Bounds x="890" y="262" width="300" height="70" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="TextAnnotation_Resilience_di" bpmnElement="TextAnnotation_Resilience">
+        <dc:Bounds x="1220" y="262" width="300" height="70" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="TextAnnotation_Compensation_di" bpmnElement="TextAnnotation_Compensation">
+        <dc:Bounds x="1615" y="470" width="210" height="60" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="TextAnnotation_Rollback_di" bpmnElement="TextAnnotation_Rollback">
+        <dc:Bounds x="1675" y="650" width="155" height="100" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="TextAnnotation_MultiCluster_di" bpmnElement="TextAnnotation_MultiCluster">
+        <dc:Bounds x="1945" y="220" width="260" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="TextAnnotation_Withdrawal_di" bpmnElement="TextAnnotation_Withdrawal">
+        <dc:Bounds x="2250" y="270" width="200" height="55" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Flow_ToReserveLimit_di" bpmnElement="Flow_ToReserveLimit">
+        <di:waypoint x="898" y="400" />
+        <di:waypoint x="940" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToDrawUpContract_di" bpmnElement="Flow_ToDrawUpContract">
+        <di:waypoint x="1040" y="400" />
+        <di:waypoint x="1090" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToAwaitSignature_di" bpmnElement="Flow_ToAwaitSignature">
+        <di:waypoint x="1190" y="400" />
+        <di:waypoint x="1240" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToSignatureExpired_di" bpmnElement="Flow_ToSignatureExpired">
+        <di:waypoint x="1290" y="458" />
+        <di:waypoint x="1290" y="492" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToCoreAnswer_di" bpmnElement="Flow_ToCoreAnswer">
+        <di:waypoint x="1340" y="400" />
+        <di:waypoint x="1395" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_CoreAccepted_di" bpmnElement="Flow_CoreAccepted">
+        <di:waypoint x="1445" y="400" />
+        <di:waypoint x="1490" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_CoreRejected_di" bpmnElement="Flow_CoreRejected">
+        <di:waypoint x="1420" y="425" />
+        <di:waypoint x="1420" y="492" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToSagaCommitted_di" bpmnElement="Flow_ToSagaCommitted">
+        <di:waypoint x="1590" y="400" />
+        <di:waypoint x="1652" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_ReleaseLimit_di" bpmnElement="Association_ReleaseLimit">
+        <di:waypoint x="990" y="458" />
+        <di:waypoint x="990" y="480" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_CancelContract_di" bpmnElement="Association_CancelContract">
+        <di:waypoint x="1140" y="458" />
+        <di:waypoint x="1140" y="480" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_CollectBack_di" bpmnElement="Association_CollectBack">
+        <di:waypoint x="1540" y="458" />
+        <di:waypoint x="1540" y="480" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToUndoDisbursement_di" bpmnElement="Flow_ToUndoDisbursement">
+        <di:waypoint x="976" y="690" />
+        <di:waypoint x="1040" y="690" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToUndoContract_di" bpmnElement="Flow_ToUndoContract">
+        <di:waypoint x="1076" y="690" />
+        <di:waypoint x="1140" y="690" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToUndoLimit_di" bpmnElement="Flow_ToUndoLimit">
+        <di:waypoint x="1176" y="690" />
+        <di:waypoint x="1240" y="690" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToRecordRollback_di" bpmnElement="Flow_ToRecordRollback">
+        <di:waypoint x="1276" y="690" />
+        <di:waypoint x="1340" y="690" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToRolledBack_di" bpmnElement="Flow_ToRolledBack">
+        <di:waypoint x="1440" y="690" />
+        <di:waypoint x="1500" y="690" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToScore_di" bpmnElement="Flow_ToScore">
+        <di:waypoint x="208" y="400" />
+        <di:waypoint x="250" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToCreditDecision_di" bpmnElement="Flow_ToCreditDecision">
+        <di:waypoint x="350" y="400" />
+        <di:waypoint x="405" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Approved_di" bpmnElement="Flow_Approved">
+        <di:waypoint x="455" y="400" />
+        <di:waypoint x="735" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Referred_di" bpmnElement="Flow_Referred">
+        <di:waypoint x="430" y="425" />
+        <di:waypoint x="430" y="600" />
+        <di:waypoint x="480" y="600" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Declined_di" bpmnElement="Flow_Declined">
+        <di:waypoint x="430" y="375" />
+        <di:waypoint x="430" y="185" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToUnderwriterDecision_di" bpmnElement="Flow_ToUnderwriterDecision">
+        <di:waypoint x="580" y="600" />
+        <di:waypoint x="635" y="600" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_UnderwriterApproved_di" bpmnElement="Flow_UnderwriterApproved">
+        <di:waypoint x="685" y="600" />
+        <di:waypoint x="760" y="600" />
+        <di:waypoint x="760" y="425" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_UnderwriterDeclined_di" bpmnElement="Flow_UnderwriterDeclined">
+        <di:waypoint x="660" y="575" />
+        <di:waypoint x="660" y="520" />
+        <di:waypoint x="360" y="520" />
+        <di:waypoint x="360" y="160" />
+        <di:waypoint x="405" y="160" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_UnderwriterSlaToNoDecision_di" bpmnElement="Flow_UnderwriterSlaToNoDecision">
+        <di:waypoint x="530" y="658" />
+        <di:waypoint x="530" y="702" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_NoDecisionToDeclined_di" bpmnElement="Flow_NoDecisionToDeclined">
+        <di:waypoint x="512" y="720" />
+        <di:waypoint x="330" y="720" />
+        <di:waypoint x="330" y="150" />
+        <di:waypoint x="410" y="150" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToRecordDecline_di" bpmnElement="Flow_ToRecordDecline">
+        <di:waypoint x="455" y="160" />
+        <di:waypoint x="480" y="160" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_DeclineToClose_di" bpmnElement="Flow_DeclineToClose">
+        <di:waypoint x="580" y="160" />
+        <di:waypoint x="2590" y="160" />
+        <di:waypoint x="2590" y="375" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToSaga_di" bpmnElement="Flow_ToSaga">
+        <di:waypoint x="785" y="400" />
+        <di:waypoint x="830" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToSagaOutcome_di" bpmnElement="Flow_ToSagaOutcome">
+        <di:waypoint x="1840" y="400" />
+        <di:waypoint x="1885" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_SagaCommitted_di" bpmnElement="Flow_SagaCommitted">
+        <di:waypoint x="1935" y="400" />
+        <di:waypoint x="1970" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_SagaCompensated_di" bpmnElement="Flow_SagaCompensated">
+        <di:waypoint x="1910" y="425" />
+        <di:waypoint x="1910" y="860" />
+        <di:waypoint x="2400" y="860" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToWithdrawalWindow_di" bpmnElement="Flow_ToWithdrawalWindow">
+        <di:waypoint x="2070" y="400" />
+        <di:waypoint x="2125" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToWithdrawn_di" bpmnElement="Flow_ToWithdrawn">
+        <di:waypoint x="2175" y="400" />
+        <di:waypoint x="2222" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToPeriodOver_di" bpmnElement="Flow_ToPeriodOver">
+        <di:waypoint x="2150" y="425" />
+        <di:waypoint x="2150" y="550" />
+        <di:waypoint x="2222" y="550" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToCompensateLoan_di" bpmnElement="Flow_ToCompensateLoan">
+        <di:waypoint x="2258" y="400" />
+        <di:waypoint x="2312" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToRecordWithdrawal_di" bpmnElement="Flow_ToRecordWithdrawal">
+        <di:waypoint x="2348" y="400" />
+        <di:waypoint x="2400" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToRecordActive_di" bpmnElement="Flow_ToRecordActive">
+        <di:waypoint x="2258" y="550" />
+        <di:waypoint x="2400" y="550" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_WithdrawalToClose_di" bpmnElement="Flow_WithdrawalToClose">
+        <di:waypoint x="2500" y="400" />
+        <di:waypoint x="2565" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ActiveToClose_di" bpmnElement="Flow_ActiveToClose">
+        <di:waypoint x="2500" y="550" />
+        <di:waypoint x="2590" y="550" />
+        <di:waypoint x="2590" y="425" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_RolledBackToClose_di" bpmnElement="Flow_RolledBackToClose">
+        <di:waypoint x="2500" y="860" />
+        <di:waypoint x="2600" y="860" />
+        <di:waypoint x="2600" y="420" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToRelayClosing_di" bpmnElement="Flow_ToRelayClosing">
+        <di:waypoint x="2615" y="400" />
+        <di:waypoint x="2650" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToClosed_di" bpmnElement="Flow_ToClosed">
+        <di:waypoint x="2750" y="400" />
+        <di:waypoint x="2812" y="400" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_Hitl_di" bpmnElement="Association_Hitl">
+        <di:waypoint x="640" y="690" />
+        <di:waypoint x="580" y="630" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_NoXa_di" bpmnElement="Association_NoXa">
+        <di:waypoint x="990" y="332" />
+        <di:waypoint x="990" y="360" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_Resilience_di" bpmnElement="Association_Resilience">
+        <di:waypoint x="1290" y="332" />
+        <di:waypoint x="1290" y="360" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_Compensation_di" bpmnElement="Association_Compensation">
+        <di:waypoint x="1615" y="500" />
+        <di:waypoint x="1590" y="520" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_Rollback_di" bpmnElement="Association_Rollback">
+        <di:waypoint x="1675" y="700" />
+        <di:waypoint x="1660" y="700" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_MultiCluster_di" bpmnElement="Association_MultiCluster">
+        <di:waypoint x="2020" y="300" />
+        <di:waypoint x="2020" y="360" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_Withdrawal_di" bpmnElement="Association_Withdrawal">
+        <di:waypoint x="2330" y="325" />
+        <di:waypoint x="2330" y="382" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

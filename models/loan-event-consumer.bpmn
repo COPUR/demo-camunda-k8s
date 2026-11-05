@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+                  xmlns:modeler="http://camunda.org/schema/modeler/1.0"
+                  id="Definitions_LoanEventConsumer"
+                  targetNamespace="https://fintechbankx.example/bpo"
+                  exporter="fbx-bpo" exporterVersion="0.1.0"
+                  modeler:executionPlatform="Camunda Cloud"
+                  modeler:executionPlatformVersion="8.10.0">
+  <bpmn:signal id="Signal_LoanEvent" name="Sig_LoanEventPublished" />
+  <!-- A downstream consumer of the loan events (customer notification, ledger projection). One instance per
+       published event, so Operate shows what the relay handed over. A real consumer keeps the eventIds it has seen
+       and drops a repeat (idempotent consumer); this one only records the event. -->
+  <bpmn:process id="loan-event-consumer" name="Loan event consumer" isExecutable="true">
+    <bpmn:extensionElements>
+      <zeebe:versionTag value="0.1.0" />
+    </bpmn:extensionElements>
+    <bpmn:startEvent id="StartEvent_LoanEventReceived" name="Loan event received">
+      <bpmn:outgoing>Flow_ToProject</bpmn:outgoing>
+      <bpmn:signalEventDefinition id="SignalEventDefinition_LoanEventReceived" signalRef="Signal_LoanEvent" />
+    </bpmn:startEvent>
+    <bpmn:scriptTask id="Task_ProjectEvent" name="Project the event">
+      <bpmn:extensionElements>
+        <zeebe:script expression="={applicationId: applicationId, lastEvent: eventType, dedupKey: eventId}" resultVariable="projection" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ToProject</bpmn:incoming>
+      <bpmn:outgoing>Flow_ToProjected</bpmn:outgoing>
+    </bpmn:scriptTask>
+    <bpmn:endEvent id="EndEvent_Projected" name="Event projected">
+      <bpmn:incoming>Flow_ToProjected</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="Flow_ToProject" sourceRef="StartEvent_LoanEventReceived" targetRef="Task_ProjectEvent" />
+    <bpmn:sequenceFlow id="Flow_ToProjected" sourceRef="Task_ProjectEvent" targetRef="EndEvent_Projected" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_loan-event-consumer">
+    <bpmndi:BPMNPlane id="BPMNPlane_loan-event-consumer" bpmnElement="loan-event-consumer">
+      <bpmndi:BPMNShape id="StartEvent_LoanEventReceived_di" bpmnElement="StartEvent_LoanEventReceived">
+        <dc:Bounds x="172" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_ProjectEvent_di" bpmnElement="Task_ProjectEvent">
+        <dc:Bounds x="260" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_Projected_di" bpmnElement="EndEvent_Projected">
+        <dc:Bounds x="422" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Flow_ToProject_di" bpmnElement="Flow_ToProject">
+        <di:waypoint x="208" y="120" />
+        <di:waypoint x="260" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ToProjected_di" bpmnElement="Flow_ToProjected">
+        <di:waypoint x="360" y="120" />
+        <di:waypoint x="422" y="120" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>
