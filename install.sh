@@ -125,7 +125,8 @@ fi
 
 # --- 5. Models and sample data as ConfigMaps ---------------------------------------------------------------------
 kubectl -n "$NS" create configmap demo-models --from-file=models/ --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-kubectl -n "$NS" create configmap demo-scenarios --from-file=sample-data/scenarios.json --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl -n "$NS" create configmap demo-scenarios --from-file=sample-data/scenarios.json \
+  --from-file=sample-data/loans.json --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n "$NS" create configmap demo-loader --from-file=sample-data/load.sh --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 # --- 6. PostgreSQL and Keycloak ----------------------------------------------------------------------------------
@@ -152,7 +153,7 @@ kubectl -n "$NS" rollout restart deployment/sim-psg-tr deployment/sim-acc deploy
 for d in sim-psg-tr sim-acc sim-pay sim-ntf bpo-worker-payments; do kubectl -n "$NS" rollout status "deployment/$d" --timeout=300s; done
 
 # --- 9. Sample data and verification ------------------------------------------------------------------------------
-info "synthetic sample data (9 TR FAST payments)"
+info "synthetic sample data (9 TR FAST payments, 6 consumer loan applications)"
 kubectl -n "$NS" delete job demo-loader --ignore-not-found >/dev/null
 kubectl apply -f k8s/60-loader-job.yaml >/dev/null
 kubectl -n "$NS" wait --for=condition=complete job/demo-loader --timeout=300s >/dev/null
@@ -189,5 +190,5 @@ Then sign in with username "presenter":
   Identity  http://localhost:8084
 Read the generated password yourself:
   kubectl --context $DEMO_CONTEXT -n $NS get secret demo-presenter -o jsonpath='{.data.password}' | base64 -d; echo
-Health: ./status.sh     Remove everything: ./uninstall.sh
+Health: ./status.sh     Consumer loan saga: ./demo.sh loan     Remove everything: ./uninstall.sh
 MSG

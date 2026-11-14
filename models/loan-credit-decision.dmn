@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="https://www.omg.org/spec/DMN/20191111/MODEL/"
+             xmlns:modeler="http://camunda.org/schema/modeler/1.0"
+             xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+             id="Definitions_LoanCreditDecision" name="loan credit decision"
+             namespace="https://fintechbankx.example/bpo"
+             modeler:executionPlatform="Camunda Cloud"
+             modeler:executionPlatformVersion="8.10.0">
+  <!-- Synthetic credit policy for the consumer loan saga demo (demo-tr-loan-*); not a real scoring model. The score is
+       on the 1-1900 scale Turkish credit bureaus use; the burden is the plain instalment-to-income ratio without
+       interest. FIRST hit: declines before referrals before approvals. -->
+  <decision id="loan-credit-decision" name="Consumer loan credit decision">
+    <extensionElements>
+      <zeebe:versionTag value="0.1.0" />
+    </extensionElements>
+    <decisionTable id="DecisionTable_LoanCreditDecision" hitPolicy="FIRST">
+      <input id="Input_CreditScore" label="Credit score">
+        <inputExpression id="InputExpression_CreditScore" typeRef="number">
+          <text>creditScore</text>
+        </inputExpression>
+      </input>
+      <input id="Input_Amount" label="Amount (TRY)">
+        <inputExpression id="InputExpression_Amount" typeRef="number">
+          <text>amount</text>
+        </inputExpression>
+      </input>
+      <input id="Input_Burden" label="Instalment to income">
+        <inputExpression id="InputExpression_Burden" typeRef="number">
+          <text>amount / termMonths / monthlyIncome</text>
+        </inputExpression>
+      </input>
+      <output id="Output_Outcome" label="Outcome" name="outcome" typeRef="string" />
+      <output id="Output_MonthlyRate" label="Monthly rate" name="monthlyRate" typeRef="number" />
+      <output id="Output_Reason" label="Reason" name="reason" typeRef="string" />
+      <rule id="Rule_LowScore">
+        <inputEntry id="InputEntry_LowScore_S"><text>&lt; 1100</text></inputEntry>
+        <inputEntry id="InputEntry_LowScore_A"><text>-</text></inputEntry>
+        <inputEntry id="InputEntry_LowScore_B"><text>-</text></inputEntry>
+        <outputEntry id="OutputEntry_LowScore_O"><text>"DECLINE"</text></outputEntry>
+        <outputEntry id="OutputEntry_LowScore_R"><text>null</text></outputEntry>
+        <outputEntry id="OutputEntry_LowScore_W"><text>"Credit score below 1100"</text></outputEntry>
+      </rule>
+      <rule id="Rule_Burden">
+        <inputEntry id="InputEntry_Burden_S"><text>-</text></inputEntry>
+        <inputEntry id="InputEntry_Burden_A"><text>-</text></inputEntry>
+        <inputEntry id="InputEntry_Burden_B"><text>&gt; 0.5</text></inputEntry>
+        <outputEntry id="OutputEntry_Burden_O"><text>"DECLINE"</text></outputEntry>
+        <outputEntry id="OutputEntry_Burden_R"><text>null</text></outputEntry>
+        <outputEntry id="OutputEntry_Burden_W"><text>"Instalment above half of the income"</text></outputEntry>
+      </rule>
+      <rule id="Rule_LargeAmount">
+        <inputEntry id="InputEntry_LargeAmount_S"><text>-</text></inputEntry>
+        <inputEntry id="InputEntry_LargeAmount_A"><text>&gt; 250000</text></inputEntry>
+        <inputEntry id="InputEntry_LargeAmount_B"><text>-</text></inputEntry>
+        <outputEntry id="OutputEntry_LargeAmount_O"><text>"REFER"</text></outputEntry>
+        <outputEntry id="OutputEntry_LargeAmount_R"><text>0.0399</text></outputEntry>
+        <outputEntry id="OutputEntry_LargeAmount_W"><text>"Above the automatic approval amount"</text></outputEntry>
+      </rule>
+      <rule id="Rule_ReviewBand">
+        <inputEntry id="InputEntry_ReviewBand_S"><text>[1100..1400)</text></inputEntry>
+        <inputEntry id="InputEntry_ReviewBand_A"><text>-</text></inputEntry>
+        <inputEntry id="InputEntry_ReviewBand_B"><text>-</text></inputEntry>
+        <outputEntry id="OutputEntry_ReviewBand_O"><text>"REFER"</text></outputEntry>
+        <outputEntry id="OutputEntry_ReviewBand_R"><text>0.0429</text></outputEntry>
+        <outputEntry id="OutputEntry_ReviewBand_W"><text>"Score in the manual review band"</text></outputEntry>
+      </rule>
+      <rule id="Rule_Approve">
+        <inputEntry id="InputEntry_Approve_S"><text>&gt;= 1400</text></inputEntry>
+        <inputEntry id="InputEntry_Approve_A"><text>-</text></inputEntry>
+        <inputEntry id="InputEntry_Approve_B"><text>-</text></inputEntry>
+        <outputEntry id="OutputEntry_Approve_O"><text>"APPROVE"</text></outputEntry>
+        <outputEntry id="OutputEntry_Approve_R"><text>0.0359</text></outputEntry>
+        <outputEntry id="OutputEntry_Approve_W"><text>"Automatic approval"</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+</definitions>
